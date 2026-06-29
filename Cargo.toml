@@ -19,10 +19,10 @@ readme = "README.md"
 description = "Intermediate representation and lowering from the AST."
 
 # Keywords (5 max)
-keywords = [compiler,language,ir,lowering]
+keywords = ["compiler", "language", "ir", "lowering"]
 
 # Categories
-categories = [development-tools,compilers]
+categories = ["development-tools", "compilers"]
 
 # Links
 homepage      = "https://github.com/jamesgober/ir-lang"
