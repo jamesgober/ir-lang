@@ -18,7 +18,7 @@
 
 <div align="left">
     <p>
-        ir-lang is the SEMA-tier crate: An intermediate representation and AST-to-IR lowering, where optimization passes run. Part of the -lang language-construction family; see _strategy/LANG_COLLECTION.md for the master plan.
+        ir-lang is the intermediate representation a compiler optimizes and lowers code through. A <code>Function</code> is a control-flow graph of basic blocks in SSA form: each block is a straight-line run of value-producing instructions ended by one terminator, and every value is named by a small handle and defined exactly once. There is no AST type to lower <em>from</em> &mdash; a language brings its own syntax tree &mdash; so lowering is expressed through a <code>Builder</code>, the same shape as Cranelift's <code>FunctionBuilder</code> or LLVM's <code>IRBuilder</code>. It is a SEMA-tier crate of the <code>-lang</code> language-construction family.
     </p>
     <br>
     <hr>
@@ -37,14 +37,127 @@
 
 ```toml
 [dependencies]
-ir-lang = "0.1"
+ir-lang = "0.2"
 ```
+
+Or from the terminal:
+
+```bash
+cargo add ir-lang
+```
+
+<br>
+
+## Usage
+
+A front-end walks its own syntax tree and drives the `Builder`: a literal becomes a
+constant, an operator becomes an instruction, an `if` becomes two blocks and a
+branch, a join becomes a block parameter. The builder hands back a `Value` for every
+result, so SSA numbering is captured without tracking it by hand. When the function
+is built, `validate` confirms it is well-formed.
+
+Lowering `fn abs(x: int) -> int { if x < 0 { -x } else { x } }`:
+
+```rust
+use ir_lang::{Builder, BinOp, Type, UnOp};
+
+let mut b = Builder::new("abs", &[Type::Int], Type::Int);
+let x = b.block_params(b.entry())[0];
+
+// The merge point takes the result as a parameter.
+let join = b.create_block(&[Type::Int]);
+let neg_blk = b.create_block(&[]);
+let pos_blk = b.create_block(&[]);
+
+let zero = b.iconst(0);
+let is_neg = b.bin(BinOp::Lt, x, zero);
+b.branch(is_neg, neg_blk, &[], pos_blk, &[]);
+
+b.switch_to(neg_blk);
+let negated = b.un(UnOp::Neg, x);
+b.jump(join, &[negated]);
+
+b.switch_to(pos_blk);
+b.jump(join, &[x]);
+
+b.switch_to(join);
+let result = b.block_params(join)[0];
+b.ret(Some(result));
+
+let func = b.finish();
+assert!(func.validate().is_ok());
+```
+
+A function prints as a readable textual IR, which is handy in tests and when
+debugging a pass:
+
+```rust
+use ir_lang::{Builder, BinOp, Type};
+
+let mut b = Builder::new("poly", &[Type::Int, Type::Int], Type::Int);
+let a = b.block_params(b.entry())[0];
+let c = b.block_params(b.entry())[1];
+let sum = b.bin(BinOp::Add, a, c);
+let diff = b.bin(BinOp::Sub, a, c);
+let product = b.bin(BinOp::Mul, sum, diff);
+b.ret(Some(product));
+
+let text = b.finish().to_string();
+assert!(text.contains("v4: int = mul v2, v3"));
+assert!(text.contains("return v4"));
+```
+
+Construction does not check well-formedness as it goes; `validate` does, returning a
+defined error rather than panicking when the IR is wrong:
+
+```rust
+use ir_lang::{Builder, BinOp, Type, ValidationError};
+
+// `int + bool` is not a valid operation.
+let mut b = Builder::new("bad", &[Type::Int, Type::Bool], Type::Int);
+let x = b.block_params(b.entry())[0];
+let flag = b.block_params(b.entry())[1];
+let oops = b.bin(BinOp::Add, x, flag);
+b.ret(Some(oops));
+
+assert!(matches!(
+    b.finish().validate(),
+    Err(ValidationError::TypeMismatch { .. })
+));
+```
+
+See <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
+
+<br>
+
+## How it works
+
+A `Function` keeps its blocks and values in flat arenas addressed by dense `Block`
+and `Value` indices, so building and walking the IR is a linear pass over
+contiguous memory rather than a chase through pointers, and a pass can key a side
+table directly on a handle's index. Values cross control-flow joins as block
+parameters — a `jump` or `branch` passes one argument per target parameter — which
+keeps the representation flat and removes the bookkeeping of phi nodes.
+
+`validate` is where correctness is enforced. It checks the structural rules (one
+terminator per block, branch targets that exist, argument counts and types that
+match the target parameters, a numeric or boolean operand where the operation
+requires it) and then the SSA dominance property: every use of a value is reached by
+its single definition. Dominators are computed with the Cooper–Harvey–Kennedy
+algorithm over the reachable graph, and both the dominator and reachability walks use
+an explicit stack, so a deeply nested function cannot overflow the call stack.
 
 <br>
 
 ## Status
 
-This is the <code>v0.1.0</code> scaffold: structure, tooling, and quality gates are in place; the implementation lands across the 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a> and <a href="./docs/API.md"><code>docs/API.md</code></a>.
+<code>v0.2.0</code> is the core release: the IR types, the `Builder` lowering
+interface, the textual `Display`, and `validate` are in place, with the public
+surface still being designed across the 0.x series and frozen at <code>1.0.0</code>.
+The crate is self-contained — it defines its own machine-level `Type` and is driven
+entirely through the builder — so it pulls in no first-party dependency; a front-end
+maps its own AST and source types onto the IR. Every core invariant is
+property-tested against generated programs and verified on Linux, macOS, and Windows.
 
 <hr>
 <br>
