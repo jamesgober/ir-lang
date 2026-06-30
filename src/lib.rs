@@ -65,9 +65,10 @@
 //!
 //! ## Stability
 //!
-//! The public surface is being designed across the 0.x series and freezes at
-//! `1.0.0`, after which it follows Semantic Versioning. The current surface is
-//! catalogued in [`docs/API.md`](https://github.com/jamesgober/ir-lang/blob/main/docs/API.md).
+//! The public surface is frozen and stable as of `1.0.0`: it follows Semantic
+//! Versioning, with no breaking changes before `2.0`. The full surface and the
+//! SemVer promise are catalogued in
+//! [`docs/API.md`](https://github.com/jamesgober/ir-lang/blob/main/docs/API.md#semver-promise).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

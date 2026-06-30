@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: stable (1.0).</strong> The public API is frozen and follows Semantic Versioning &mdash; no breaking changes before <code>2.0</code>. See <a href="./docs/API.md#semver-promise"><code>the SemVer promise</code></a> and <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
     </blockquote>
 </div>
 
@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-ir-lang = "0.2"
+ir-lang = "1.0"
 ```
 
 Or from the terminal:
@@ -155,13 +155,16 @@ deeply nested function cannot overflow the call stack.
 
 ## Status
 
-<code>v0.2.0</code> is the core release: the IR types, the `Builder` lowering
-interface, the textual `Display`, and `validate` are in place, with the public
-surface still being designed across the 0.x series and frozen at <code>1.0.0</code>.
-The crate is self-contained — it defines its own machine-level `Type` and is driven
-entirely through the builder — so it pulls in no first-party dependency; a front-end
-maps its own AST and source types onto the IR. Every core invariant is
-property-tested against generated programs and verified on Linux, macOS, and Windows.
+<code>v1.0.0</code> is the stable release: the public API is frozen and follows
+Semantic Versioning, with no breaking changes before <code>2.0</code>. The surface is
+the IR core — the `Function` SSA control-flow graph, the `Builder` lowering interface,
+the textual `Display`, and `validate` — and the crate is self-contained: it defines
+its own machine-level `Type` and is driven entirely through the builder, so it pulls
+in no first-party dependency; a front-end maps its own AST and source types onto the
+IR. Every core invariant is property-tested against generated programs, the dominator
+and dominance algorithms were fuzzed against a brute-force reference, and the suite is
+verified on Linux, macOS, and Windows. See the
+<a href="./docs/API.md#semver-promise"><code>SemVer promise</code></a>.
 
 <hr>
 <br>

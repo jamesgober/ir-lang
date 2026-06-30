@@ -41,7 +41,16 @@ full intra-function control flow. Calls (`Call` instruction + opaque callee hand
 and a `Module` are additive — they arrive in a later 0.x minor without breaking the
 v0.2.0 surface.
 
-## v1.0.0 - API freeze
+## v1.0.0 - API freeze (DONE)
 Public surface stable and frozen until 2.0.
-- [ ] docs/API.md marked stable; SemVer promise recorded.
-- [ ] Full test + benchmark suite green on all three platforms.
+- [x] docs/API.md marked stable; SemVer promise recorded.
+- [x] Full test + benchmark suite green on all three platforms.
+
+The 0.2.0 surface is frozen as the 1.0 contract; no breaking change. The freeze added
+a faster (linear) dominance validator, a complete check for hand-assembled / `serde`
+IR (one additive `ValidationError::InconsistentDefinition` variant), runnable
+examples, and the stability docs. The dominator and SSA-dominance algorithms were
+fuzzed against a brute-force reference by an independent adversarial review.
+
+Post-1.0 additive candidates (each a minor release): function calls (a `Call`
+instruction + opaque callee handle) and a multi-function module container.

@@ -1,10 +1,9 @@
 # ir-lang &mdash; API Reference
 
 > Complete reference for every public item in `ir-lang`, with examples.
-> **Status: pre-1.0 (v0.2.0).** The surface below is the core release; it is still
-> being designed across the 0.x series and freezes at `1.0.0`. Minor 0.x releases may
-> make breaking changes, each noted in [`../CHANGELOG.md`](../CHANGELOG.md). See
-> [`../dev/ROADMAP.md`](../dev/ROADMAP.md).
+> **Status: stable (1.0).** The surface below is the `1.0` contract; it follows
+> [Semantic Versioning](#semver-promise) and will not change in a breaking way before
+> `2.0`. See [`../dev/ROADMAP.md`](../dev/ROADMAP.md).
 
 ## Table of Contents
 
@@ -38,7 +37,7 @@
   - [Textual form (`Display`)](#textual-form-display)
 - [`ValidationError`](#validationerror)
 - [Feature flags](#feature-flags)
-- [Stability & SemVer](#stability--semver)
+- [SemVer promise](#semver-promise)
 
 ---
 
@@ -64,7 +63,7 @@ source language's AST and types onto the IR is the consumer's lowering step.
 
 ```toml
 [dependencies]
-ir-lang = "0.2"
+ir-lang = "1.0"
 ```
 
 Or from the terminal:
@@ -697,13 +696,22 @@ another, per the project's SemVer policy.
 
 ---
 
-## Stability & SemVer
+## SemVer promise
 
-The crate follows [Semantic Versioning](https://semver.org). During the 0.x series
-the public surface is still being designed, so a minor release may make a breaking
-change — each is documented in [`../CHANGELOG.md`](../CHANGELOG.md) with a migration
-note. At `1.0.0` the surface freezes: no breaking change before `2.0`, additions
-arrive in minor releases, and the MSRV only rises in a minor release. This file is
-updated in lockstep with every release so it always matches the code.
+As of `1.0.0` the public surface is frozen. The crate follows
+[Semantic Versioning](https://semver.org):
+
+- No documented item is removed or changed in a breaking way within `1.x`; breaking
+  changes wait for `2.0`.
+- New functionality is additive and arrives in minor releases. [`ValidationError`](#validationerror)
+  is `#[non_exhaustive]`, so a new error variant is a minor change, not a breaking
+  one; a `match` on it must keep a wildcard arm. The instructions and types
+  ([`Inst`](#inst), [`Terminator`](#terminator), [`Type`](#type), [`BinOp`](#binop),
+  [`UnOp`](#unop)) may likewise gain variants in a minor release.
+- The MSRV is Rust `1.85`; raising it is a minor change, never a patch.
+- Behaviour is part of the contract: a function that validates today keeps
+  validating, and the textual `Display` form is stable for a given function.
+
+This file is updated in lockstep with every release so it always matches the code.
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
