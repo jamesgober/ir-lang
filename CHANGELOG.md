@@ -37,14 +37,19 @@ reasoning).
   logical operations, unary operations, block parameters, jumps, conditional
   branches, and returns. Result types are inferred from the operation.
 - `Function::validate` with `ValidationError`: structural checks (one terminator per
-  block, valid branch targets, argument count and type matching, operand typing) and
-  the SSA dominance property, with dominators computed by the Cooper–Harvey–Kennedy
-  algorithm. Both the reachability and dominator walks use an explicit stack, so a
-  deeply nested function cannot overflow the call stack.
+  block, valid branch targets, argument count and type matching, operand typing), the
+  SSA dominance property, and value-table integrity (handle ranges, definition sites,
+  recorded result types) — a complete check for a hand-assembled or deserialized
+  function, not only a builder-produced one. Dominators are computed by the
+  Cooper–Harvey–Kennedy algorithm, and the dominance check itself is a single linear
+  pre-order walk of the dominator tree carrying one reused availability set — no
+  per-block allocation. The reachability, dominator, and dominance walks all use an
+  explicit stack, so a deeply nested function cannot overflow the call stack.
 - Textual IR: `Display` for `Function`.
 - `serde` derives for every IR type behind the `serde` feature.
-- Criterion benchmarks for building and validating straight-line and
-  control-flow-heavy functions.
+- Runnable examples (`examples/lower_ast.rs`, `examples/validation.rs`) and criterion
+  benchmarks for building and validating straight-line and control-flow-heavy
+  functions.
 
 ---
 

@@ -661,8 +661,12 @@ must include a wildcard arm.
 | `NotNumeric { value, found }` | an arithmetic operation was applied to a non-numeric value |
 | `ReturnValueExpected { expected }` | a valueless `return` in a non-`Unit` function |
 | `UseBeforeDef { value, block }` | a value is used where its definition does not reach |
+| `InconsistentDefinition { value }` | a value's recorded definition disagrees with the block that lists it (hand-built / deserialized IR only) |
 
-`ValidationError` implements `Display` and `std::error::Error`.
+`ValidationError` implements `Display` and `std::error::Error`. Because the validator
+checks the value table itself — handle ranges, definition sites, and result types —
+it is a complete gate for any `Function`, including one assembled by hand or
+deserialized through `serde`, not just one the [`Builder`](#builder) produced.
 
 ```rust
 use ir_lang::{Builder, BinOp, Type, ValidationError};

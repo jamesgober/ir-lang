@@ -353,9 +353,12 @@ impl Function {
     /// targets a real block with a matching number and type of arguments; every
     /// value is referenced only where its single definition reaches it; operations
     /// are applied to operands of the right type; and the entry block is never a
-    /// branch target. The [`Builder`](crate::Builder) does not check these as it
-    /// goes, so run this once construction is complete — and again on the output of
-    /// any pass that rewrites the IR.
+    /// branch target. The check also gates the value table itself — handle ranges,
+    /// definition sites, and recorded result types — so it is a complete check for a
+    /// function assembled by hand or deserialized through `serde`, not only one the
+    /// [`Builder`](crate::Builder) produced. The builder does not check any of this
+    /// as it goes, so run this once construction is complete — and again on the
+    /// output of any pass that rewrites the IR.
     ///
     /// # Errors
     ///

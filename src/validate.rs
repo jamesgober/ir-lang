@@ -90,6 +90,16 @@ pub enum ValidationError {
         /// The block the premature use is in.
         block: Block,
     },
+    /// A value's recorded definition is inconsistent with the block that lists it:
+    /// the value is listed in a block other than the one it records as its
+    /// definition site, or it is listed as a parameter while it records an
+    /// instruction result (or the reverse). The [`Builder`](crate::Builder) never
+    /// produces this; it can only arise from a hand-assembled or corrupt
+    /// deserialized function.
+    InconsistentDefinition {
+        /// The value whose definition does not match where it is listed.
+        value: Value,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -138,6 +148,12 @@ impl fmt::Display for ValidationError {
                     "value {value} is used in block {block} before it is defined"
                 )
             }
+            ValidationError::InconsistentDefinition { value } => {
+                write!(
+                    f,
+                    "value {value} is listed in a block that disagrees with its recorded definition"
+                )
+            }
         }
     }
 }
@@ -151,14 +167,27 @@ impl core::error::Error for ValidationError {}
 pub(crate) fn validate(func: &Function) -> Result<(), ValidationError> {
     let block_count = func.block_count();
 
+    // The entry must be a real block. A `Builder` always makes one, but a function
+    // assembled by other means (a `serde` round-trip of corrupt data) might not, and
+    // the dominator computation indexes by the entry, so this is checked first.
+    if func.entry().index() >= block_count {
+        return Err(ValidationError::BlockOutOfRange {
+            block: func.entry(),
+        });
+    }
+
     // Structural and type checks over every block, reachable or not.
     let mut succs: Vec<Vec<Block>> = Vec::with_capacity(block_count);
     for block in func.blocks() {
         let term = func
             .terminator(block)
             .ok_or(ValidationError::MissingTerminator { block })?;
-        check_terminator(func, block, term, block_count)?;
+        // The block's own definitions are well-formed and consistent with the value
+        // table, then its instructions and terminator type-check. Instructions are
+        // checked before the terminator so the most upstream error is reported.
+        check_block_definitions(func, block)?;
         check_block_insts(func, block)?;
+        check_terminator(func, block, term, block_count)?;
         succs.push(successors(term));
     }
 
@@ -257,12 +286,87 @@ fn check_edge(
     Ok(())
 }
 
-/// Type-checks every instruction in a block.
+/// Checks that every value a block lists — its parameters and its instruction
+/// results — is in range and records the same definition site and kind that the
+/// listing implies. This is what makes the value table trustworthy for IR that did
+/// not come from the [`Builder`](crate::Builder), such as a deserialized function.
+fn check_block_definitions(func: &Function, block: Block) -> Result<(), ValidationError> {
+    for &value in func.block_params(block) {
+        check_definition(func, value, block, DefKind::Param)?;
+    }
+    for &value in func.insts(block) {
+        check_definition(func, value, block, DefKind::Inst)?;
+    }
+    Ok(())
+}
+
+/// Whether a value is defined as a block parameter or as an instruction result.
+#[derive(PartialEq)]
+enum DefKind {
+    Param,
+    Inst,
+}
+
+/// Verifies one listed value: the handle is in range, its recorded defining block is
+/// the block that lists it, and its kind (parameter vs. instruction result) matches
+/// the list it appears in.
+fn check_definition(
+    func: &Function,
+    value: Value,
+    block: Block,
+    kind: DefKind,
+) -> Result<(), ValidationError> {
+    let def_block = func
+        .value_block(value)
+        .ok_or(ValidationError::ValueOutOfRange { value })?;
+    let def_kind = if func.inst(value).is_some() {
+        DefKind::Inst
+    } else {
+        DefKind::Param
+    };
+    if def_block != block || def_kind != kind {
+        return Err(ValidationError::InconsistentDefinition { value });
+    }
+    Ok(())
+}
+
+/// Type-checks every instruction in a block and confirms each result's recorded type
+/// is the type the instruction actually produces.
 fn check_block_insts(func: &Function, block: Block) -> Result<(), ValidationError> {
     for &value in func.insts(block) {
         if let Some(inst) = func.inst(value) {
             check_inst(func, inst)?;
+            check_result_type(func, value, inst)?;
         }
+    }
+    Ok(())
+}
+
+/// Confirms a value's recorded type is the type its defining instruction produces —
+/// the missing half of type safety for IR that did not come from the builder, which
+/// always records the right type.
+fn check_result_type(func: &Function, value: Value, inst: &Inst) -> Result<(), ValidationError> {
+    let expected = match inst {
+        Inst::Iconst(_) => Type::Int,
+        Inst::Fconst(_) => Type::Float,
+        Inst::Bconst(_) => Type::Bool,
+        Inst::Bin(op, lhs, _) => {
+            if op.is_comparison() || op.is_logical() {
+                Type::Bool
+            } else {
+                value_type(func, *lhs)?
+            }
+        }
+        Inst::Un(UnOp::Neg, operand) => value_type(func, *operand)?,
+        Inst::Un(UnOp::Not, _) => Type::Bool,
+    };
+    let found = value_type(func, value)?;
+    if found != expected {
+        return Err(ValidationError::TypeMismatch {
+            value,
+            expected,
+            found,
+        });
     }
     Ok(())
 }
@@ -352,59 +456,88 @@ fn successors(term: &Terminator) -> Vec<Block> {
     out
 }
 
+/// A node-entry or node-exit step in the iterative dominator-tree walk.
+enum Visit {
+    Enter(usize),
+    Exit(usize),
+}
+
 /// Checks the SSA dominance property over the reachable control-flow graph: every
-/// value a reachable block uses is defined by a definition that reaches it.
+/// value a reachable block uses is reached by its single definition.
+///
+/// A single pre-order walk of the dominator tree carries one availability set: a
+/// block's definitions are added to it on entry and removed on exit, so a value is
+/// visible in exactly the block that defines it and the blocks that block dominates,
+/// never in a sibling subtree. The whole check is therefore linear in the size of the
+/// function with no per-block allocation, and the walk uses an explicit stack so a
+/// deeply nested dominator tree cannot overflow the call stack.
 fn check_dominance(func: &Function, succs: &[Vec<Block>]) -> Result<(), ValidationError> {
     let n = succs.len();
     let entry = func.entry().index();
     let idom = compute_idoms(entry, n, succs);
 
-    for bi in 0..n {
-        // idom is set exactly for the reachable blocks; skip the rest.
-        if idom[bi].is_none() {
-            continue;
-        }
-        let block = Block::from_raw(bi as u32);
-
-        // Values available on entry to the block: everything defined in a block that
-        // strictly dominates it, plus this block's own parameters.
-        let mut available = alloc::vec![false; func.value_count()];
-        for dom in strict_dominators(bi, entry, &idom) {
-            mark_defs(func, Block::from_raw(dom as u32), &mut available);
-        }
-        for &param in func.block_params(block) {
-            set_available(&mut available, param);
-        }
-
-        // Walk the block in program order; each instruction's operands must already
-        // be available, then its result becomes available.
-        for &value in func.insts(block) {
-            if let Some(inst) = func.inst(value) {
-                check_operands_available(inst, &available, block)?;
+    // The dominator-tree children of each reachable block. `idom` is `Some` exactly
+    // for reachable blocks, so unreachable code never enters the walk; it has no
+    // definitions that can reach a use that executes.
+    let mut children: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    for (b, dom) in idom.iter().enumerate() {
+        if let Some(parent) = *dom {
+            if b != entry {
+                children[parent].push(b);
             }
-            set_available(&mut available, value);
         }
-        if let Some(term) = func.terminator(block) {
-            check_terminator_operands_available(term, &available, block)?;
+    }
+
+    let mut available = alloc::vec![false; func.value_count()];
+    let mut stack = alloc::vec![Visit::Enter(entry)];
+    while let Some(visit) = stack.pop() {
+        match visit {
+            Visit::Exit(b) => {
+                let block = Block::from_raw(b as u32);
+                for &value in func.block_params(block) {
+                    clear_available(&mut available, value);
+                }
+                for &value in func.insts(block) {
+                    clear_available(&mut available, value);
+                }
+            }
+            Visit::Enter(b) => {
+                let block = Block::from_raw(b as u32);
+                // A block's parameters are available throughout it and its subtree.
+                for &param in func.block_params(block) {
+                    set_available(&mut available, param);
+                }
+                // Walk in program order: each operand must already be available, then
+                // the result it defines becomes available.
+                for &value in func.insts(block) {
+                    if let Some(inst) = func.inst(value) {
+                        check_operands_available(inst, &available, block)?;
+                    }
+                    set_available(&mut available, value);
+                }
+                if let Some(term) = func.terminator(block) {
+                    check_terminator_operands_available(term, &available, block)?;
+                }
+                // Exit runs after every descendant, undoing this block's definitions.
+                stack.push(Visit::Exit(b));
+                for &child in &children[b] {
+                    stack.push(Visit::Enter(child));
+                }
+            }
         }
     }
     Ok(())
 }
 
-/// Marks every value defined in `block` (its parameters and instruction results) as
-/// available.
-fn mark_defs(func: &Function, block: Block, available: &mut [bool]) {
-    for &param in func.block_params(block) {
-        set_available(available, param);
-    }
-    for &value in func.insts(block) {
-        set_available(available, value);
-    }
-}
-
 fn set_available(available: &mut [bool], value: Value) {
     if let Some(slot) = available.get_mut(value.index()) {
         *slot = true;
+    }
+}
+
+fn clear_available(available: &mut [bool], value: Value) {
+    if let Some(slot) = available.get_mut(value.index()) {
+        *slot = false;
     }
 }
 
@@ -468,24 +601,6 @@ fn require_available(
     } else {
         Err(ValidationError::UseBeforeDef { value, block })
     }
-}
-
-/// Returns the strict dominators of block `bi`, from immediate dominator up to the
-/// entry. Empty for the entry itself.
-fn strict_dominators(bi: usize, entry: usize, idom: &[Option<usize>]) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut cur = idom[bi];
-    while let Some(d) = cur {
-        if d == bi {
-            break; // only the entry is its own immediate dominator
-        }
-        out.push(d);
-        if d == entry {
-            break;
-        }
-        cur = idom[d];
-    }
-    out
 }
 
 /// Computes immediate dominators with the Cooper–Harvey–Kennedy algorithm. The
@@ -593,7 +708,8 @@ fn postorder(entry: usize, n: usize, succs: &[Vec<Block>]) -> Vec<usize> {
     reason = "tests assert on specific error variants; a wrong variant should fail loudly"
 )]
 mod tests {
-    use crate::function::{BlockData, Function};
+    use crate::function::{BlockData, Function, ValueData, ValueDef};
+    use crate::inst::Inst;
     use crate::{BinOp, Block, Builder, Terminator, Type, UnOp, Value};
 
     use super::ValidationError;
@@ -799,6 +915,73 @@ mod tests {
     }
 
     #[test]
+    fn test_value_defined_in_sibling_branch_is_rejected() {
+        // A value defined only in the `then` arm cannot be used in the `else` arm:
+        // neither branch dominates the other.
+        let mut b = Builder::new("f", &[Type::Bool], Type::Int);
+        let cond = b.block_params(b.entry())[0];
+        let then_blk = b.create_block(&[]);
+        let else_blk = b.create_block(&[]);
+        let join = b.create_block(&[Type::Int]);
+        b.branch(cond, then_blk, &[], else_blk, &[]);
+
+        b.switch_to(then_blk);
+        let secret = b.iconst(7); // defined only here
+        b.jump(join, &[secret]);
+
+        b.switch_to(else_blk);
+        b.jump(join, &[secret]); // ...but used here, in the sibling branch
+
+        b.switch_to(join);
+        let r = b.block_params(join)[0];
+        b.ret(Some(r));
+
+        assert_eq!(
+            b.finish().validate(),
+            Err(ValidationError::UseBeforeDef {
+                value: secret,
+                block: else_blk,
+            })
+        );
+    }
+
+    #[test]
+    fn test_value_from_dominating_block_is_visible_deep_below() {
+        // A value defined in the entry is visible through nested control flow, even
+        // several dominator-tree levels down.
+        let mut b = Builder::new("f", &[Type::Int], Type::Int);
+        let base = b.iconst(100); // defined in entry, dominates everything
+        let outer_then = b.create_block(&[]);
+        let outer_else = b.create_block(&[]);
+        let inner_then = b.create_block(&[]);
+        let inner_else = b.create_block(&[]);
+        let join = b.create_block(&[Type::Int]);
+
+        let p = b.block_params(b.entry())[0];
+        let zero = b.iconst(0);
+        let c0 = b.bin(BinOp::Gt, p, zero);
+        b.branch(c0, outer_then, &[], outer_else, &[]);
+
+        b.switch_to(outer_then);
+        let c1 = b.bin(BinOp::Lt, p, base); // uses `base` from entry
+        b.branch(c1, inner_then, &[], inner_else, &[]);
+
+        b.switch_to(inner_then);
+        b.jump(join, &[base]); // uses `base` two levels down
+        b.switch_to(inner_else);
+        b.jump(join, &[base]);
+
+        b.switch_to(outer_else);
+        b.jump(join, &[base]);
+
+        b.switch_to(join);
+        let r = b.block_params(join)[0];
+        b.ret(Some(r));
+
+        assert_eq!(b.finish().validate(), Ok(()));
+    }
+
+    #[test]
     fn test_out_of_range_value_is_rejected() {
         // White-box: assemble a function that references a nonexistent value.
         let entry = Block::from_raw(0);
@@ -824,6 +1007,50 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_function_is_rejected_without_panicking() {
+        // White-box: a function with no blocks at all. The entry handle points past
+        // the (empty) block list, so this must be a defined error, not a panic.
+        let func = Function::from_parts(
+            "empty".to_string(),
+            vec![],
+            Type::Unit,
+            Block::from_raw(0),
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            func.validate(),
+            Err(ValidationError::BlockOutOfRange {
+                block: Block::from_raw(0)
+            })
+        );
+    }
+
+    #[test]
+    fn test_out_of_range_entry_is_rejected_without_panicking() {
+        // White-box: a corrupt entry index, as a bad `serde` payload could produce.
+        let blocks = vec![BlockData {
+            params: vec![],
+            insts: vec![],
+            term: Some(Terminator::Return(None)),
+        }];
+        let func = Function::from_parts(
+            "f".to_string(),
+            vec![],
+            Type::Unit,
+            Block::from_raw(7), // no such block
+            blocks,
+            vec![],
+        );
+        assert_eq!(
+            func.validate(),
+            Err(ValidationError::BlockOutOfRange {
+                block: Block::from_raw(7)
+            })
+        );
+    }
+
+    #[test]
     fn test_out_of_range_block_is_rejected() {
         // White-box: a terminator jumping to a block that does not exist.
         let entry = Block::from_raw(0);
@@ -837,6 +1064,73 @@ mod tests {
             func.validate(),
             Err(ValidationError::BlockOutOfRange {
                 block: Block::from_raw(9)
+            })
+        );
+    }
+
+    #[test]
+    fn test_wrong_result_type_is_rejected() {
+        // White-box: an instruction whose recorded result type is not what it
+        // produces — `iconst` claiming to be a `bool`. The builder never does this,
+        // but a corrupt serde payload could.
+        let entry = Block::from_raw(0);
+        let values = vec![ValueData {
+            ty: Type::Bool, // wrong: iconst produces Int
+            def: ValueDef::Inst(entry, Inst::Iconst(1)),
+        }];
+        let blocks = vec![BlockData {
+            params: vec![],
+            insts: vec![Value::from_raw(0)],
+            term: Some(Terminator::Return(Some(Value::from_raw(0)))),
+        }];
+        let func = Function::from_parts("f".to_string(), vec![], Type::Bool, entry, blocks, values);
+        assert_eq!(
+            func.validate(),
+            Err(ValidationError::TypeMismatch {
+                value: Value::from_raw(0),
+                expected: Type::Int,
+                found: Type::Bool,
+            })
+        );
+    }
+
+    #[test]
+    fn test_value_listed_as_param_but_defined_as_inst_is_rejected() {
+        // White-box: a value listed in a block's parameters while its recorded
+        // definition is an instruction result.
+        let entry = Block::from_raw(0);
+        let values = vec![ValueData {
+            ty: Type::Int,
+            def: ValueDef::Inst(entry, Inst::Iconst(0)), // says Inst...
+        }];
+        let blocks = vec![BlockData {
+            params: vec![Value::from_raw(0)], // ...but listed as a parameter
+            insts: vec![],
+            term: Some(Terminator::Return(None)),
+        }];
+        let func = Function::from_parts("f".to_string(), vec![], Type::Unit, entry, blocks, values);
+        assert_eq!(
+            func.validate(),
+            Err(ValidationError::InconsistentDefinition {
+                value: Value::from_raw(0)
+            })
+        );
+    }
+
+    #[test]
+    fn test_out_of_range_block_param_handle_is_rejected() {
+        // White-box: a block parameter naming a value that does not exist.
+        let entry = Block::from_raw(0);
+        let blocks = vec![BlockData {
+            params: vec![Value::from_raw(9)], // no such value
+            insts: vec![],
+            term: Some(Terminator::Return(None)),
+        }];
+        let func = Function::from_parts("f".to_string(), vec![], Type::Unit, entry, blocks, vec![]);
+        assert_eq!(
+            func.validate(),
+            Err(ValidationError::ValueOutOfRange {
+                value: Value::from_raw(9)
             })
         );
     }

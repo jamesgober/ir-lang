@@ -126,7 +126,9 @@ assert!(matches!(
 ));
 ```
 
-See <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
+See <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference, and
+<a href="./examples/"><code>examples/</code></a> for runnable demonstrations
+(`cargo run --example lower_ast`, `cargo run --example validation`).
 
 <br>
 
@@ -144,8 +146,10 @@ terminator per block, branch targets that exist, argument counts and types that
 match the target parameters, a numeric or boolean operand where the operation
 requires it) and then the SSA dominance property: every use of a value is reached by
 its single definition. Dominators are computed with the Cooper–Harvey–Kennedy
-algorithm over the reachable graph, and both the dominator and reachability walks use
-an explicit stack, so a deeply nested function cannot overflow the call stack.
+algorithm over the reachable graph, and the dominance check is a single linear walk
+of the dominator tree carrying one reused availability set — no per-block allocation.
+The reachability, dominator, and dominance walks all use an explicit stack, so a
+deeply nested function cannot overflow the call stack.
 
 <br>
 
