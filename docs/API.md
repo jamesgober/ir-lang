@@ -1,717 +1,771 @@
 # ir-lang &mdash; API Reference
 
-> Complete reference for every public item in `ir-lang`, with examples.
-> **Status: stable (1.0).** The surface below is the `1.0` contract; it follows
-> [Semantic Versioning](#semver-promise) and will not change in a breaking way before
-> `2.0`. See [`../dev/ROADMAP.md`](../dev/ROADMAP.md).
+> Complete reference for every public item in `ir-lang` 2.0.0-alpha.1, with examples.
+> **Status: pre-release.** The surface may change before `2.0.0`; see
+> [`../dev/ROADMAP.md`](../dev/ROADMAP.md). The normative semantics are
+> `_lexersketch/specs/IR.md` (the IR) and `_lexersketch/specs/OPS.md` (operations).
 
-## Table of Contents
+<sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
+
+## Table of contents
 
 - [Overview](#overview)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [The model](#the-model)
-- [`Type`](#type)
-- [`Value`](#value)
-- [`Block`](#block)
-- [`BinOp`](#binop)
-- [`UnOp`](#unop)
-- [`Inst`](#inst)
-- [`Terminator`](#terminator)
-- [`Builder`](#builder)
-  - [`Builder::new`](#buildernew)
-  - [`Builder::entry` / `current_block`](#builderentry--current_block)
-  - [`Builder::create_block`](#buildercreate_block)
-  - [`Builder::block_params`](#builderblock_params)
-  - [`Builder::switch_to`](#builderswitch_to)
-  - [`Builder::iconst` / `fconst` / `bconst`](#buildericonst--fconst--bconst)
-  - [`Builder::bin`](#builderbin)
-  - [`Builder::un`](#builderun)
-  - [`Builder::ret` / `jump` / `branch`](#builderret--jump--branch)
-  - [`Builder::finish`](#builderfinish)
+- [Concepts](#concepts)
+  - [Modules, functions, blocks, values](#modules-functions-blocks-values)
+  - [Handles](#handles)
+  - [Types](#types)
+  - [Policies](#policies)
+  - [Error and exception edges](#error-and-exception-edges)
+  - [Safepoints and GC references](#safepoints-and-gc-references)
+  - [Rewriting](#rewriting)
+  - [The textual form](#the-textual-form)
+- [`Module`](#module)
+- [Declarations: `FuncDecl`, `Linkage`, `Global`, `Init`, `Reloc`, `SymbolRef`](#declarations)
+- [Types: `Type`, `PointerWidth`, `MemType`, `Aggregate`, `Layout`, `Signature`, `CallConv`](#type)
 - [`Function`](#function)
-  - [Signature accessors](#signature-accessors)
-  - [Graph accessors](#graph-accessors)
-  - [Value accessors](#value-accessors)
-  - [`Function::validate`](#functionvalidate)
-  - [Textual form (`Display`)](#textual-form-display)
-- [`ValidationError`](#validationerror)
+- [Handles: `Value`, `Block`, `Inst`, `StackSlot`, `FuncId`, `GlobalId`, `SigId`, `AggId`, `ValueRange`](#handles-1)
+- [`Builder`](#builder)
+- [`InstData`](#instdata)
+- [`Terminator`](#terminator)
+- [Edges: `BlockCall`, `BlockArg`, `SwitchCase`, `Successors`](#edges)
+- [Calls: `Call`, `CallTarget`, `Attrs`](#calls)
+- [Memory: `MemFlags`, `MemOrder`, `RmwOp`](#memory)
+- [Operations: `UnaryOp`, `BinaryOp`, `CmpOp`, `ConvOp`](#operations)
+- [Policies: `Policy`, `PolicyFields`, `Overflow`, `DivZero`, `Shift`, `FloatToInt`, `OpError`](#policy)
+- [Errors: `ModuleError`, `BuildError`, `ValidationError`, `ValidationErrorKind`](#errors)
+- [`parse`](#parse)
+- [`interp` (feature `interp`)](#interp-feature-interp)
 - [Feature flags](#feature-flags)
-- [SemVer promise](#semver-promise)
-
----
+- [Limits](#limits)
+- [Stability](#stability)
 
 ## Overview
 
-ir-lang is the intermediate representation a compiler optimizes and lowers code
-through. A [`Function`](#function) is a control-flow graph of basic blocks in SSA
-form: each block is a straight-line run of value-producing [instructions](#inst)
-ended by one [terminator](#terminator), and every [value](#value) is named by a small
-handle and defined exactly once. Values cross control-flow joins as block parameters
-rather than phi nodes.
-
-There is no AST type here to lower *from* — a language brings its own syntax tree —
-so lowering is expressed through the [`Builder`](#builder): a front-end walks its tree
-and calls a builder method per construct, the same shape as Cranelift's
-`FunctionBuilder` or LLVM's `IRBuilder`. The crate is self-contained: it defines its
-own machine-level [`Type`](#type) and wires no first-party dependency. Mapping a
-source language's AST and types onto the IR is the consumer's lowering step.
-
----
+| Item | Kind | Purpose |
+|---|---|---|
+| [`Module`](#module) | struct | Declarations and function bodies; validation; printing. |
+| [`Builder`](#builder) | struct | Lowers into a body and rewrites it. |
+| [`Function`](#function) | struct | A body: blocks, instructions, values, stack slots (read access). |
+| [`InstData`](#instdata), [`Terminator`](#terminator) | enums | Instruction and terminator data. |
+| [`Type`](#type), [`Aggregate`](#aggregate), [`Signature`](#signature) | types | Value types, memory layout, signatures. |
+| [`Policy`](#policy) | struct | The OPS policy every operation instance carries. |
+| [`parse`](#parse) | function | Reads the textual form. |
+| [`interp`](#interp-feature-interp) | module | Reference interpreter and per-operation semantics (feature `interp`). |
+| [`ValidationError`](#validationerror), [`BuildError`](#builderror), [`ModuleError`](#moduleerror), [`ParseError`](#parseerror) | errors | Why something was refused. |
 
 ## Installation
 
 ```toml
 [dependencies]
-ir-lang = "1.0"
+ir-lang = "2.0.0-alpha.1"                                              # the IR
+ir-lang = { version = "2.0.0-alpha.1", features = ["interp"] }         # plus the interpreter
+ir-lang = { version = "2.0.0-alpha.1", default-features = false }      # no_std + alloc
 ```
-
-Or from the terminal:
-
-```bash
-cargo add ir-lang
-```
-
-MSRV: Rust 1.85 (Rust 2024 edition).
-
----
 
 ## Quick start
 
-Lower and validate `fn max(a: int, b: int) -> int { if a < b { b } else { a } }`:
-
 ```rust
-use ir_lang::{Builder, BinOp, Type};
+use ir_lang::{CmpOp, Linkage, Module, Overflow, Signature, Type};
 
-let mut b = Builder::new("max", &[Type::Int, Type::Int], Type::Int);
-let a = b.block_params(b.entry())[0];
-let bb = b.block_params(b.entry())[1];
-
-let join = b.create_block(&[Type::Int]);   // takes the chosen value
-let then_blk = b.create_block(&[]);
-let else_blk = b.create_block(&[]);
-
-let cond = b.bin(BinOp::Lt, a, bb);
-b.branch(cond, then_blk, &[], else_blk, &[]);
-
-b.switch_to(then_blk);
-b.jump(join, &[bb]);
-
-b.switch_to(else_blk);
-b.jump(join, &[a]);
-
-b.switch_to(join);
-let result = b.block_params(join)[0];
-b.ret(Some(result));
-
-let func = b.finish();
-assert!(func.validate().is_ok());
+// fn sum(n: i64) -> i64 { let mut s = 0; let mut i = 0; while i < n { s += i; i += 1 } s }
+let mut m = Module::new("demo");
+let f = m.declare_function("sum", &Signature::new(&[Type::I64], &[Type::I64]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let n = b.param(0)?;
+let head = b.create_block(&[Type::I64, Type::I64])?;
+let body = b.create_block(&[])?;
+let exit = b.create_block(&[])?;
+let zero = b.iconst(Type::I64, 0)?;
+b.jump(head, &[zero, zero])?;
+b.switch_to(head)?;
+let (s, i) = (b.block_param(head, 0)?, b.block_param(head, 1)?);
+let more = b.compare(CmpOp::Lt, i, n)?;
+b.branch(more, body, &[], exit, &[])?;
+b.switch_to(body)?;
+let s2 = b.add(s, i, Overflow::Wrap)?;
+let one = b.iconst(Type::I64, 1)?;
+let i2 = b.add(i, one, Overflow::Wrap)?;
+b.jump(head, &[s2, i2])?;
+b.switch_to(exit)?;
+b.ret(&[s])?;
+m.validate()?;
+println!("{m}");
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## Concepts
+
+### Modules, functions, blocks, values
+
+A [`Module`](#module) declares functions (defined or imported), globals, signatures, and
+aggregates, and holds function bodies. A body ([`Function`](#function)) is blocks; each block
+has typed **parameters**, instructions, and one [terminator](#terminator). Edges pass one
+argument per target parameter; the parameters receive them all at once (a parallel copy), so
+there are no phi nodes. The entry block's parameters are the function's parameters, and no edge
+targets it. Every value has one type and one definition.
+
+### Handles
+
+Entities are named by dense `u32` handles (`Value`, `Block`, `Inst`, `StackSlot` per function;
+`FuncId`, `GlobalId`, `SigId`, `AggId` per module). They are never reused: removal leaves a
+tombstone. Only [`Builder::compact`](#buildercompact) renumbers, and it returns a
+[`Remap`](#remap).
+
+### Types
+
+Integers are sized and signed or unsigned (`i8`..`i64`, `u8`..`u64`), as in OPS; every
+signedness-dependent operation takes its signedness from its operand type. Floats are `f32` and
+`f64`; `bool` is its own type; `ptr` is an untraced address and `ref` a GC reference, both as
+wide as the module's [`PointerWidth`](#pointerwidth). Aggregates are memory-only. See IR.md §2.
+
+### Policies
+
+Every operation instance carries a [`Policy`](#policy) with exactly the fields its operation
+needs for its operand class ([`Policy::required_binary`](#policy) and siblings). A field set to
+`error` means the operation can raise an error, so it must be the operation of a `check`
+terminator; `trap` aborts the program; `wrap`, `mask`, `saturate` never fail. `promote` does not
+exist here (every value is statically typed).
+
+### Error and exception edges
+
+- `check OP to normal(res0) error on_error(err)`: a fallible operation; the error edge receives
+  the OPS code (`u32`).
+- `invoke CALL to normal(res0, …) unwind pad(exn, …)`: a call whose exception goes to a landing
+  pad; a landing pad is reached only by unwind edges.
+- `resume payload`: unwinds out of the function.
+- A plain `call` whose callee unwinds propagates the exception out of the caller.
+
+### Safepoints and GC references
+
+A call or invoke that is not `nogc`, and every `safepoint` instruction, is a safepoint. A `ref`
+needed after a safepoint goes through its **GC list**; the safepoint defines the relocated
+reference (after the call's returns), and the old value must not be used again. Pointers derived
+from a `ref` (`ref_to_ptr`, then arithmetic) must not be live across any safepoint and must not
+escape. The validator enforces both (IR.md §9).
+
+### Rewriting
+
+The same [`Builder`](#builder) rewrites an existing body ([`Module::edit`](#moduleedit)):
+insert at a [`Position`](#position), [`replace_all_uses`](#builderreplace_all_uses) (O(1)
+forwarding), [`remove_inst`](#builderremove_inst), [`replace_inst`](#builderreplace_inst),
+[`split_block`](#buildersplit_block), block-parameter edits, [`compact`](#buildercompact).
+Validate between passes with [`Builder::validate`](#buildervalidate).
+
+### The textual form
+
+`Display for Module` prints a deterministic text; [`parse`](#parse) reads it back to the same
+module with the same handles. The grammar is in IR.md §13.
 
 ---
 
-## The model
+## `Module`
 
-A function owns two flat arenas: one of blocks, one of values. A [`Block`](#block)
-and a [`Value`](#value) are dense `u32` indices into those arenas — `Copy`, stable
-for the life of the function, and usable as a key into a side table a pass keeps
-alongside the IR. A block holds its parameter values, the values its instructions
-define in order, and one terminator. A value records its type and where it is
-defined: either a block parameter or the result of an instruction.
-
-Construction (the [`Builder`](#builder)) and verification
-([`Function::validate`](#functionvalidate)) are separate steps. The builder records
-what you tell it without checking well-formedness, which keeps lowering cheap and
-lets you emit blocks in any order; `validate` then confirms the structural and SSA
-invariants in one pass. Run it once the function is built, and again on the output of
-any pass that rewrites the IR.
-
----
-
-## `Type`
-
-The machine-level type of a value — the IR's own small type system, independent of
-any source language.
-
-| Variant | Meaning |
-| ------- | ------- |
-| `Type::Int` | A signed integer value. |
-| `Type::Float` | A floating-point value. |
-| `Type::Bool` | A boolean, as produced by a comparison or logical operation. |
-| `Type::Unit` | The absence of a value; the return type of a function that returns nothing. |
-
-**Method** — `Type::is_numeric(self) -> bool`: `true` for `Int` and `Float`, the
-types arithmetic and ordering accept.
+A compilation unit. Declare first, then build bodies.
 
 ```rust
-use ir_lang::Type;
+use ir_lang::{Aggregate, Global, Linkage, Module, Signature, Type};
 
-assert_eq!(Type::Int.to_string(), "int");
-assert!(Type::Float.is_numeric());
-assert!(!Type::Bool.is_numeric());
+let mut m = Module::new("app");
+let point = m.declare_aggregate(Aggregate::structure(&[Type::F64.into(), Type::F64.into()]))?;
+let origin = m.declare_global("origin", Global::zeroed(16, 8))?;
+let f = m.declare_function("len", &Signature::new(&[Type::Ptr], &[Type::F64]), Linkage::Export)?;
+assert_eq!(m.layout(point.into()).unwrap().size(), 16);
+assert!(m.function(f).is_none()); // declared, no body yet
+# let _ = origin;
+# Ok::<(), ir_lang::ModuleError>(())
 ```
 
-`Type` is `Copy`, `Eq`, `Ord`, `Hash`, and `Display`.
+| Method | Description | Errors |
+|---|---|---|
+| `new(name)` | An empty module with 64-bit addresses. | — |
+| `with_pointer_width(name, PointerWidth)` | An empty module with the given address width. | — |
+| `name()`, `pointer_width()` | The module name; the address width. | — |
+| `intern_signature(&Signature) -> SigId` | Interns a signature (equal signatures share a handle). | `CapacityExceeded` |
+| `signature(SigId) -> Option<&Signature>`, `signature_count()` | Reads interned signatures. | — |
+| `declare_aggregate(Aggregate) -> AggId` | Declares an aggregate and computes its layout. Components must be declared earlier. | `UnknownAggregate`, `AggregateTooLarge`, `CapacityExceeded` |
+| `aggregate(AggId)`, `aggregate_count()` | Reads aggregates. | — |
+| `layout(MemType) -> Option<Layout>` | Size and alignment of a scalar or aggregate. | — |
+| `field_offset(AggId, field) -> Option<u64>` | Byte offset of a struct field. | — |
+| `declare_function(name, &Signature, Linkage) -> FuncId` | Declares a function (signature interned). | `EmptyName`, `DuplicateName`, `CapacityExceeded` |
+| `set_attrs(FuncId, Attrs)` | Sets a function's attributes. | `UnknownFunction` |
+| `func_decl(FuncId) -> Option<&FuncDecl>`, `func_signature(FuncId)` | Reads a declaration. | — |
+| `function(FuncId) -> Option<&Function>` | The body, if built. | — |
+| `functions()`, `function_count()` | All function handles. | — |
+| `declare_global(name, Global) -> GlobalId` | Declares a global. Relocation targets are checked by `validate`. | `EmptyName`, `DuplicateName`, `BadAlignment`, `InitSizeMismatch`, `RelocOutOfRange`, `ImportWithData`, `CapacityExceeded` |
+| `global(GlobalId)`, `global_name(GlobalId)`, `globals()`, `global_count()` | Reads globals. | — |
+| `lookup(name) -> Option<SymbolRef>` | A function or global by name. | — |
+| `build(FuncId) -> Builder` | Creates the body (entry parameters from the signature); the builder is at the end of the entry block. | `UnknownFunction`, `CannotDefineImport`, `AlreadyDefined` |
+| `edit(FuncId) -> Builder` | A builder over an existing body, for rewriting. | `UnknownFunction`, `NotDefined` |
+| `validate()` | Checks the whole module (IR.md §11). | the first `ValidationError` |
+| `validate_function(FuncId)` | Checks one body. | `ValidationError` |
+| `display_function(FuncId)` | Prints one function. | — |
+| `Display` | Prints the module in the textual form. | — |
 
----
+### `Module::build`
 
-## `Value`
+Creates the body of a declared, non-imported function. While the returned `Builder` lives, the
+module's declarations are borrowed: declare everything the body needs first.
 
-A handle to an SSA value — the result of one instruction or one block parameter. It
-is `Copy`, prints as `v<n>`, and is dense from zero.
+### `Module::edit`
 
-**Method** — `Value::index(self) -> usize`: the zero-based index, for use as a key
-into a side table.
+Returns a builder over an existing body (positioned at the end of the entry block) for
+rewriting.
+
+### `Module::validate`
+
+Total (never panics), linear in the module (plus the live ranges of GC references for the
+safepoint rule). Returns the first violation in the documented order.
 
 ```rust
-use ir_lang::{Builder, Type};
+use ir_lang::{Linkage, Module, Signature, ValidationErrorKind};
 
-let mut b = Builder::new("k", &[Type::Int], Type::Int);
-let x = b.block_params(b.entry())[0];
-let one = b.iconst(1);
-
-assert_eq!(x.to_string(), "v0");
-assert_eq!(one.index(), 1);
+let mut m = Module::new("m");
+let f = m.declare_function("f", &Signature::new(&[], &[]), Linkage::Export)?;
+assert_eq!(m.validate().unwrap_err().kind(), &ValidationErrorKind::MissingBody);
+let mut b = m.build(f)?;
+b.ret(&[])?;
+m.validate()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Handles are scoped to the function that minted them — do not use one function's
-values in another.
+## Declarations
 
----
+### `FuncDecl`
 
-## `Block`
+A function declaration. Accessors: `name()`, `sig() -> SigId`, `linkage()`, `attrs()`.
 
-A handle to a basic block. `Copy`, prints as `b<n>`, dense from zero; the entry block
-is always `b0`.
+### `Linkage`
 
-**Method** — `Block::index(self) -> usize`: the zero-based index.
+`Local` (defined, module-private), `Export` (defined, visible), `Import` (defined elsewhere; no
+body). `name()`/`from_name()` give the textual names. `#[non_exhaustive]`.
+
+### `Global`
 
 ```rust
-use ir_lang::{Builder, Type};
+use ir_lang::{FuncId, Global, Linkage, Module, Reloc, SymbolRef};
 
-let mut b = Builder::new("f", &[], Type::Unit);
-let entry = b.entry();
-let exit = b.create_block(&[]);
-
-assert_eq!(entry.to_string(), "b0");
-assert_eq!(exit.index(), 1);
+let mut m = Module::new("m");
+let msg = m.declare_global("msg", Global::bytes(b"hi\0", 1))?;
+let table = m.declare_global(
+    "table",
+    Global::zeroed(8, 8)
+        .mutable()
+        .with_linkage(Linkage::Local)
+        .with_reloc(Reloc { offset: 0, target: SymbolRef::Global(msg), addend: 1 }),
+)?;
+assert_eq!(m.global(table).unwrap().relocs.len(), 1);
+# Ok::<(), ir_lang::ModuleError>(())
 ```
 
----
+Fields: `linkage`, `size` (bytes), `align` (power of two ≤ 2^16), `mutable`, `init`, `relocs`.
+Constructors: `zeroed(size, align)`, `bytes(&[u8], align)`, `import(size, align)`; builders
+`mutable()`, `with_linkage()`, `with_reloc()`. Constant `MAX_ALIGN`.
 
-## `BinOp`
+### `Init`
 
-A binary operation. Arithmetic (`Add`, `Sub`, `Mul`, `Div`) takes two operands of
-the same numeric type and yields that type. Comparisons (`Eq`, `Ne`, `Lt`, `Le`,
-`Gt`, `Ge`) take two operands of the same type and yield `Bool`. Logical operations
-(`And`, `Or`) take two `Bool`s and yield `Bool`.
+`Zeroed` or `Bytes(Vec<u8>)` (exactly `size` bytes). `#[non_exhaustive]`.
 
-**Methods** — `is_comparison(self) -> bool`, `is_logical(self) -> bool`.
+### `Reloc`
+
+`{ offset, target: SymbolRef, addend }`: the address of `target` plus `addend`, stored as a
+pointer-width little-endian word at `offset`.
+
+### `SymbolRef`
+
+`Func(FuncId)` or `Global(GlobalId)`. `#[non_exhaustive]`.
+
+## Type
+
+`Bool, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Ptr, Ref` (`#[non_exhaustive]`; vectors
+reserved). Methods: `is_int`, `is_signed_int`, `is_unsigned_int`, `is_float`, `is_numeric`,
+`int_bits`, `bits(PointerWidth)`, `size(PointerWidth)`, `int(bits, signed)`, `name`,
+`from_name`; constant `ALL`.
 
 ```rust
-use ir_lang::BinOp;
+use ir_lang::{PointerWidth, Type};
 
-assert_eq!(BinOp::Add.to_string(), "add");
-assert!(BinOp::Lt.is_comparison());
-assert!(BinOp::And.is_logical());
-assert!(!BinOp::Mul.is_comparison());
+assert_eq!(Type::int(16, false), Some(Type::U16));
+assert_eq!(Type::Ref.size(PointerWidth::P32), 4);
+assert_eq!(Type::from_name("f64"), Some(Type::F64));
 ```
 
----
+### `PointerWidth`
 
-## `UnOp`
+`P32` or `P64` (default). `bytes()`, `bits()`, `is_address_int(Type)` (the integer side of
+`ptr_to_int`/`int_to_ptr`).
 
-A unary operation. `Neg` negates a numeric operand and yields its type; `Not` inverts
-a `Bool` and yields `Bool`.
+### `MemType`
 
-```rust
-use ir_lang::UnOp;
+`Scalar(Type)` or `Agg(AggId)`; `From<Type>` and `From<AggId>`.
 
-assert_eq!(UnOp::Neg.to_string(), "neg");
-assert_eq!(UnOp::Not.to_string(), "not");
-```
+### `Aggregate`
 
----
+`Struct { fields, packed }` or `Array { elem, len }`; constructors `structure`, `packed`,
+`array`. Layout follows the C rule (packed: alignment 1, no padding); an aggregate may name only
+earlier aggregates. Sizes are capped at `MAX_AGGREGATE_SIZE` (2^48).
 
-## `Inst`
+### `Layout`
 
-A value-producing instruction, read back from a function. You do not build one
-directly — the [`Builder`](#builder) emits one per call — but you match on it when
-inspecting or rewriting IR.
+`size()` and `align()` in bytes.
 
-| Variant | Result type |
-| ------- | ----------- |
-| `Inst::Iconst(i64)` | `Int` |
-| `Inst::Fconst(f64)` | `Float` |
-| `Inst::Bconst(bool)` | `Bool` |
-| `Inst::Bin(BinOp, Value, Value)` | follows the operation |
-| `Inst::Un(UnOp, Value)` | follows the operation |
+### `Signature`
 
-```rust
-use ir_lang::{Builder, BinOp, Inst, Type};
+`{ params, returns, conv }`; `new(params, returns)` (convention `Fast`), `with_conv(CallConv)`.
+`Display` prints `(i64) -> (bool) fast`.
 
-let mut b = Builder::new("k", &[], Type::Int);
-let one = b.iconst(1);
-let sum = b.bin(BinOp::Add, one, one);
-b.ret(Some(sum));
-let func = b.finish();
+### `CallConv`
 
-assert!(matches!(func.inst(sum), Some(Inst::Bin(BinOp::Add, _, _))));
-assert!(matches!(func.inst(one), Some(Inst::Iconst(1))));
-```
-
----
-
-## `Terminator`
-
-The single instruction that ends a block and transfers control.
-
-| Variant | Meaning |
-| ------- | ------- |
-| `Terminator::Return(Option<Value>)` | Leave the function, with a value or none. |
-| `Terminator::Jump(Block, Vec<Value>)` | Jump to a block, one argument per target parameter. |
-| `Terminator::Branch { cond, then_block, then_args, else_block, else_args }` | Branch on a `Bool`; each arm passes arguments to its target's parameters. |
-
-**Method** — `each_successor(&self, f: impl FnMut(Block))`: calls `f` for each block
-this terminator can transfer to, in order. A `Return` calls `f` zero times — this is
-how the control-flow graph is read.
-
-```rust
-use ir_lang::{Builder, Terminator, Type};
-
-let mut b = Builder::new("f", &[], Type::Unit);
-let exit = b.create_block(&[]);
-b.jump(exit, &[]);
-b.switch_to(exit);
-b.ret(None);
-let func = b.finish();
-
-let mut succs = Vec::new();
-if let Some(term) = func.terminator(func.entry()) {
-    term.each_successor(|blk| succs.push(blk));
-}
-assert_eq!(succs, vec![exit]);
-assert!(matches!(func.terminator(exit), Some(Terminator::Return(None))));
-```
-
----
-
-## `Builder`
-
-Constructs a [`Function`](#function) one instruction at a time. This is the lowering
-interface: a front-end calls a method per syntax-tree construct, and the builder
-hands back the [`Value`](#value) each result defines.
-
-### `Builder::new`
-
-```text
-Builder::new(name: impl Into<String>, params: &[Type], ret: Type) -> Builder
-```
-
-Starts a function with a name, parameter types, and return type. The entry block is
-created with one parameter per function parameter; read those input values with
-[`block_params`](#builderblock_params) on [`entry`](#builderentry--current_block).
-The entry block is current, so emission can begin at once.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let b = Builder::new("identity", &[Type::Int], Type::Int);
-assert_eq!(b.block_params(b.entry()).len(), 1);
-```
-
-### `Builder::entry` / `current_block`
-
-`entry(&self) -> Block` returns the entry block. `current_block(&self) -> Block`
-returns the block emission currently targets.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let mut b = Builder::new("f", &[], Type::Unit);
-let next = b.create_block(&[]);
-b.switch_to(next);
-assert_eq!(b.current_block(), next);
-assert_eq!(b.entry().index(), 0);
-```
-
-### `Builder::create_block`
-
-```text
-create_block(&mut self, params: &[Type]) -> Block
-```
-
-Creates a block with the given parameter types and returns its handle. Block
-parameters are how a value crosses a control-flow join in SSA form. The new block
-does not become current — call [`switch_to`](#builderswitch_to) to emit into it.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let mut b = Builder::new("f", &[], Type::Int);
-let join = b.create_block(&[Type::Int]);
-assert_eq!(b.block_params(join).len(), 1);
-```
-
-### `Builder::block_params`
-
-```text
-block_params(&self, block: Block) -> &[Value]
-```
-
-Returns a block's parameter values, in order, or an empty slice for an out-of-range
-block.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let b = Builder::new("f", &[Type::Int, Type::Bool], Type::Unit);
-let params = b.block_params(b.entry());
-assert_eq!(params.len(), 2);
-```
-
-### `Builder::switch_to`
-
-```text
-switch_to(&mut self, block: Block)
-```
-
-Switches emission to `block`; subsequent instructions and the terminator are added to
-it. Emit a block's instructions before its terminator.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let mut b = Builder::new("f", &[], Type::Unit);
-let other = b.create_block(&[]);
-b.switch_to(other);
-b.ret(None);
-```
-
-### `Builder::iconst` / `fconst` / `bconst`
-
-```text
-iconst(&mut self, value: i64) -> Value
-fconst(&mut self, value: f64) -> Value
-bconst(&mut self, value: bool) -> Value
-```
-
-Emit a constant of the matching type into the current block and return its value.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let mut b = Builder::new("k", &[], Type::Int);
-let n = b.iconst(42);
-let pi = b.fconst(3.14);
-let t = b.bconst(true);
-b.ret(Some(n));
-let func = b.finish();
-
-assert_eq!(func.value_type(n), Some(Type::Int));
-assert_eq!(func.value_type(pi), Some(Type::Float));
-assert_eq!(func.value_type(t), Some(Type::Bool));
-```
-
-### `Builder::bin`
-
-```text
-bin(&mut self, op: BinOp, lhs: Value, rhs: Value) -> Value
-```
-
-Emits a binary operation and returns the result. The result type is inferred from the
-operation — `Bool` for a comparison or logical op, the operand type for arithmetic —
-so it is never passed in. Whether the operands satisfy the operation is checked by
-[`validate`](#functionvalidate), not here.
-
-```rust
-use ir_lang::{Builder, BinOp, Type};
-
-let mut b = Builder::new("f", &[Type::Int, Type::Int], Type::Bool);
-let a = b.block_params(b.entry())[0];
-let c = b.block_params(b.entry())[1];
-let sum = b.bin(BinOp::Add, a, c);   // Int
-let lt = b.bin(BinOp::Lt, a, c);     // Bool
-b.ret(Some(lt));
-let func = b.finish();
-
-assert_eq!(func.value_type(sum), Some(Type::Int));
-assert_eq!(func.value_type(lt), Some(Type::Bool));
-```
-
-### `Builder::un`
-
-```text
-un(&mut self, op: UnOp, operand: Value) -> Value
-```
-
-Emits a unary operation and returns the result. `Neg` yields the operand's type;
-`Not` yields `Bool`.
-
-```rust
-use ir_lang::{Builder, UnOp, Type};
-
-let mut b = Builder::new("f", &[Type::Int], Type::Int);
-let x = b.block_params(b.entry())[0];
-let neg = b.un(UnOp::Neg, x);
-b.ret(Some(neg));
-assert_eq!(b.finish().value_type(neg), Some(Type::Int));
-```
-
-### `Builder::ret` / `jump` / `branch`
-
-```text
-ret(&mut self, value: Option<Value>)
-jump(&mut self, target: Block, args: &[Value])
-branch(&mut self, cond: Value, then_block: Block, then_args: &[Value],
-       else_block: Block, else_args: &[Value])
-```
-
-Set the current block's terminator. `ret(Some(v))` returns `v`; `ret(None)` returns
-from a `Unit` function. `jump` and `branch` pass one argument per parameter of each
-target block.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let mut b = Builder::new("pick", &[Type::Bool], Type::Int);
-let cond = b.block_params(b.entry())[0];
-let join = b.create_block(&[Type::Int]);
-let yes = b.create_block(&[]);
-let no = b.create_block(&[]);
-b.branch(cond, yes, &[], no, &[]);
-
-b.switch_to(yes);
-let one = b.iconst(1);
-b.jump(join, &[one]);
-
-b.switch_to(no);
-let zero = b.iconst(0);
-b.jump(join, &[zero]);
-
-b.switch_to(join);
-let r = b.block_params(join)[0];
-b.ret(Some(r));
-assert!(b.finish().validate().is_ok());
-```
-
-### `Builder::finish`
-
-```text
-finish(self) -> Function
-```
-
-Finishes construction and returns the assembled function. It is not validated by this
-call — run [`Function::validate`](#functionvalidate) on the result.
-
-```rust
-use ir_lang::{Builder, Type};
-
-let mut b = Builder::new("f", &[], Type::Unit);
-b.ret(None);
-let func = b.finish();
-assert_eq!(func.block_count(), 1);
-```
-
----
+`Fast` (default), `C`, `SysV64`, `Win64`, `Aapcs64` (`#[non_exhaustive]`); `name`, `from_name`,
+`ALL`.
 
 ## `Function`
 
-A function in SSA form. Produced by [`Builder::finish`](#builderfinish), then read
-through the accessors below.
+Read access to a body (get one from [`Module::function`](#module) or
+[`Builder::func`](#builder)).
 
-### Signature accessors
-
-| Method | Returns |
-| ------ | ------- |
-| `name(&self) -> &str` | the function's name |
-| `params(&self) -> &[Type]` | the parameter types (also the entry block's parameters) |
-| `ret(&self) -> Type` | the return type |
-| `entry(&self) -> Block` | the entry block (always `b0`) |
-
-```rust
-use ir_lang::{Builder, Type};
-
-let b = Builder::new("f", &[Type::Int, Type::Bool], Type::Float);
-let func = b.finish();
-assert_eq!(func.name(), "f");
-assert_eq!(func.params(), &[Type::Int, Type::Bool]);
-assert_eq!(func.ret(), Type::Float);
-```
-
-### Graph accessors
-
-| Method | Returns |
-| ------ | ------- |
-| `block_count(&self) -> usize` | number of blocks |
-| `value_count(&self) -> usize` | number of values (handles run `0..count`) |
-| `blocks(&self) -> impl Iterator<Item = Block>` | every block, entry first |
-| `block_params(&self, block) -> &[Value]` | a block's parameter values |
-| `insts(&self, block) -> &[Value]` | values defined by a block's instructions, in order |
-| `terminator(&self, block) -> Option<&Terminator>` | the block's terminator |
+| Method | Description |
+|---|---|
+| `entry()` | The entry block. |
+| `block_count()` | Block handles ever created (`0..block_count()`). |
+| `blocks()` | Live blocks in handle order. |
+| `is_live_block(Block)` | Exists and not removed. |
+| `block_params(Block) -> &[Value]` | A block's parameters (empty for unknown blocks). |
+| `insts(Block) -> Insts` | A block's instructions in order (the terminator is separate). |
+| `first_inst`, `last_inst`, `next_inst`, `prev_inst` | Layout navigation. |
+| `inst_count()` | Instruction handles ever created. |
+| `inst(Inst) -> Option<&InstData>` | An instruction's data. |
+| `inst_block(Inst) -> Option<Block>` | Its block (`None` once removed). |
+| `results(Inst) -> ValueRange` | The values it defines. |
+| `terminator(Block) -> Option<&Terminator>` | A block's terminator. |
+| `value_count()`, `value_type(Value)`, `value_def(Value) -> Option<ValueDef>`, `defining_inst(Value)` | Values. |
+| `resolve(Value) -> Value` | Follows `replace_all_uses` forwarding. |
+| `slot_count()`, `slot(StackSlot) -> Option<SlotData>` | Stack slots. |
+| `predecessors() -> Vec<Vec<Block>>` | Predecessors of every block, once per edge. |
 
 ```rust
-use ir_lang::{Builder, BinOp, Type};
+use ir_lang::{Linkage, Module, Overflow, Signature, Type};
 
-let mut b = Builder::new("f", &[Type::Int], Type::Int);
-let x = b.block_params(b.entry())[0];
-let _ = b.bin(BinOp::Add, x, x);
-b.ret(Some(x));
-let func = b.finish();
-
-assert_eq!(func.block_count(), 1);
-assert_eq!(func.blocks().count(), 1);
-assert_eq!(func.insts(func.entry()).len(), 1);
-assert!(func.terminator(func.entry()).is_some());
+let mut m = Module::new("m");
+let f = m.declare_function("f", &Signature::new(&[Type::I64], &[Type::I64]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.param(0)?;
+let y = b.add(x, x, Overflow::Wrap)?;
+b.ret(&[y])?;
+let func = m.function(f).unwrap();
+let entry = func.entry();
+let inst = func.insts(entry).next().unwrap();
+assert_eq!(func.results(inst).first(), Some(y));
+assert_eq!(func.value_type(y), Some(Type::I64));
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### Value accessors
+### `ValueDef`
 
-| Method | Returns |
-| ------ | ------- |
-| `inst(&self, value) -> Option<&Inst>` | the defining instruction, or `None` for a block parameter |
-| `value_type(&self, value) -> Option<Type>` | the value's type |
-| `value_block(&self, value) -> Option<Block>` | the block the value is defined in |
+`Param { block, index }`, `Result { inst, index }`, or `Detached` (its definition was removed).
 
-Out-of-range handles return `None` rather than panicking.
+### `SlotData`
+
+`{ size, align }` of a stack slot; `MAX_ALIGN` = 2^16.
+
+### `Insts`
+
+The iterator returned by `Function::insts`.
+
+### `MAX_ENTITIES`
+
+The largest number of values, blocks, instructions, or slots per function (`u32::MAX - 1`).
+
+## Handles
+
+`Value` (`v3`), `Block` (`b3`), `Inst` (`inst3`), `StackSlot` (`ss3`), `FuncId` (`f3`),
+`GlobalId` (`g3`), `SigId` (`s3`), `AggId` (`t3`). Each: `from_u32`, `index`, `as_u32`,
+`Display`, `Copy + Ord + Hash`. `Value::next()` gives the next consecutive value.
+
+### `ValueRange`
+
+The consecutive results of one instruction: `len`, `is_empty`, `get(i)`, `first`, `contains`,
+`iter`, `IntoIterator`.
+
+## `Builder`
+
+Lowers into and rewrites one body. Every instruction and terminator is checked when added (by
+the validator's own code); a refused operation changes nothing.
+
+### Reading and positioning
+
+| Method | Description | Errors |
+|---|---|---|
+| `func()`, `id()`, `signature()` | The body, its handle, its signature. | — |
+| `param(i)` | The `i`-th function parameter. | `UnknownParam` |
+| `block_param(block, i)` | A block parameter. | `UnknownBlockParam` |
+| `results(Inst)` | An instruction's values. | — |
+| `position()`, `current_block()` | The insertion point. | — |
+| `set_position(Position)` | Move it. | `UnknownBlock`, `UnknownInst` |
+| `switch_to(block)` | Move to the end of `block`. | `UnknownBlock` |
+| `validate()` | Validate this body against the module's declarations. | `ValidationError` |
+
+### Blocks
+
+| Method | Description | Errors |
+|---|---|---|
+| `create_block(&[Type])` | A new block with parameters. | `CapacityExceeded` |
+| `add_block_param(block, Type)` | Append a parameter (edges must then pass it). | `UnknownBlock` |
+| `remove_block_param(block, i)` | Remove a parameter and the matching argument of every incoming edge. | `UnknownBlock`, `UnknownBlockParam` |
+| `remove_block(block)` | Detach its instructions and parameters; tombstone it. | `EntryBlock`, `UnknownBlock` |
+| `split_block(at: Inst) -> Block` | Move `at`, the rest, and the terminator to a new block; jump to it. | `UnknownInst` |
+
+### Instructions
+
+All return `Result<Value, BuildError>` (single-result instructions) or `Result<Inst,
+BuildError>` (zero or several results; read them with `results`). Errors: `Invalid(kind)` for an
+ill-typed instruction (see [`ValidationErrorKind`](#validationerrorkind)), a stale position, or
+`CapacityExceeded`.
+
+| Method | Instruction |
+|---|---|
+| `insert(InstData) -> Inst` | Any instruction (generic door). |
+| `iconst(Type, i128)`, `f64const(f64)`, `f32const(f32)`, `bconst(bool)`, `null(Type)` | Constants (`iconst` checks the range of the type). |
+| `unary(UnaryOp, Policy, a)`, `binary(BinaryOp, Policy, a, b)` | OPS operations. |
+| `add`, `sub`, `mul (a, b, Overflow)` | Shortcuts: the overflow policy for integers, none for floats. |
+| `compare(CmpOp, a, b)`, `fma(a, b, c)`, `select(c, t, f)` | Comparison, fused multiply-add, select. |
+| `convert(ConvOp, Policy, a, Type)` | Conversions. |
+| `stack_slot(size, align) -> StackSlot`, `stack_slot_for(MemType)` | Frame memory. |
+| `stack_addr`, `global_addr`, `func_addr`, `field_addr`, `elem_addr`, `ptr_offset` | Addresses. |
+| `load(Type, addr, MemFlags)`, `store(v, addr, MemFlags) -> Inst` | Memory. |
+| `atomic_load`, `atomic_store -> Inst`, `atomic_rmw`, `cmpxchg -> Inst`, `fence -> Inst` | Atomics. |
+| `memcpy`, `memmove`, `memset -> Inst` | Bulk memory. |
+| `call(Call) -> Inst` | A call (results: returns, then relocated refs). |
+| `safepoint(&[Value]) -> Inst` | A GC poll relocating references. |
+
+### Terminators
+
+All return `Result<(), BuildError>`; `AlreadyTerminated` if the current block has one (never
+overwritten — M42).
+
+| Method | Terminator |
+|---|---|
+| `set_terminator(Terminator)` | Any terminator (generic door). |
+| `remove_terminator(block) -> Option<Terminator>` | Take one off explicitly. |
+| `jump`, `branch`, `switch`, `ret`, `unreachable`, `trap` | Control flow. |
+| `tail_call(Call)`, `invoke(Call, normal, unwind)`, `check(InstData, normal, error)`, `resume(payload)` | Calls, exceptions, errors. |
+
+### `Builder::replace_all_uses`
+
+`replace_all_uses(old, new)`: every use of `old` reads `new`, in O(1) (forwarding). Types must
+match; making two values that already resolve alike forward is a no-op; a cycle is impossible.
+Errors: `UnknownValue`, `Invalid(TypeMismatch)`.
+
+### `Builder::remove_inst`
+
+Unlinks an instruction; its results become detached (a remaining use is a validation error).
+Errors: `UnknownInst`.
+
+### `Builder::replace_inst`
+
+Replaces an instruction's data in place, keeping its results; the new data must produce the same
+result types. Errors: `UnknownInst`, `Invalid`.
+
+### `Builder::split_block`
+
+See the table above; no handle changes, and every use stays dominated.
+
+### `Builder::resolve_aliases`
+
+Rewrites every operand to its final forwarding target.
+
+### `Builder::compact`
+
+Renumbers densely (entry, then live blocks by handle; instructions and values in layout order),
+drops tombstones and forwarding, and returns the [`Remap`](#remap). A compacted module prints,
+parses back, and compares equal as text.
 
 ```rust
-use ir_lang::{Builder, Type};
+use ir_lang::{Linkage, Module, Signature, Type};
 
-let mut b = Builder::new("f", &[Type::Int], Type::Int);
-let param = b.block_params(b.entry())[0];
-let five = b.iconst(5);
-b.ret(Some(param));
-let func = b.finish();
-
-assert!(func.inst(param).is_none());            // a parameter has no instruction
-assert!(func.inst(five).is_some());
-assert_eq!(func.value_type(five), Some(Type::Int));
-assert_eq!(func.value_block(five), Some(func.entry()));
+let mut m = Module::new("m");
+let f = m.declare_function("f", &Signature::new(&[], &[Type::I32]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let dead = b.iconst(Type::I32, 1)?;
+let live = b.iconst(Type::I32, 2)?;
+b.ret(&[live])?;
+let i = b.func().defining_inst(dead).unwrap();
+b.remove_inst(i)?;
+let remap = b.compact();
+assert_eq!(remap.value(dead), None);
+assert_eq!(remap.value(live).map(|v| v.index()), Some(0));
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### `Function::validate`
+### `Builder::validate`
 
-```text
-validate(&self) -> Result<(), ValidationError>
-```
+Validates the body being built or rewritten, as `Module::validate_function` would.
 
-Checks the function is well-formed, returning the first violation found. A function
-that validates satisfies the SSA invariants the rest of a compiler relies on: one
-terminator per block; branch targets that exist with matching argument counts and
-types; every use reached by its single definition; operations applied to operands of
-the right type; and the entry block never a branch target.
+### `Position`
+
+`End(Block)`, `Before(Inst)`, `After(Inst)` (`#[non_exhaustive]`). Consecutive insertions keep
+their order in every mode.
+
+### `Remap`
+
+`value(old)`, `block(old)`, `inst(old)`: the new handle, or `None` if dropped.
+
+## `InstData`
+
+The data of a non-terminator instruction (`#[non_exhaustive]`). Variants, with typing (IR.md §5–§6):
+
+| Variant | Text | Results |
+|---|---|---|
+| `Const { ty, bits }` | `const 42` | `ty` |
+| `Unary { op, policy, arg }` | `neg<overflow=wrap> v1` | operand type |
+| `Binary { op, policy, args }` | `add<overflow=wrap> v1, v2` | operand type (`total_cmp`: `i8`) |
+| `Fma { args }` | `fma v1, v2, v3` | operand type |
+| `Compare { op, args }` | `lt v1, v2` | `bool` |
+| `Convert { op, policy, to, arg }` | `int_cast<overflow=error> v1` | `to` |
+| `Select { cond, args }` | `select v0, v1, v2` | operand type |
+| `StackAddr`, `GlobalAddr`, `FuncAddr` | `stack_addr ss0`, `global_addr @g`, `func_addr @f` | `ptr` |
+| `FieldAddr { base, agg, field }` | `field_addr v1, t0, 2` | `ptr` |
+| `ElemAddr { base, elem, index }` | `elem_addr v1, i64, v2` | `ptr` |
+| `PtrOffset { base, offset }` | `ptr_offset v1, v2` | `ptr` |
+| `Load { ty, addr, flags }` / `Store { value, addr, flags }` | `load v1 align 8` / `store v2, v1 align 8` | `ty` / none |
+| `AtomicLoad`, `AtomicStore`, `AtomicRmw`, `CmpXchg`, `Fence` | `atomic_rmw add v1, v2 seq_cst` | as the op (`cmpxchg`: value, `bool`) |
+| `MemCopy`, `MemMove`, `MemSet` | `memcpy v1, v2, v3 align 1` | none |
+| `Call(Box<Call>)` | `call @f(v1) gc(v2) [cold]` | returns, then relocated refs |
+| `Safepoint { gc }` | `safepoint gc(v1)` | relocated refs |
+
+Methods: `for_each_operand`, `map_operands`, `has_side_effects` (writes, volatile reads,
+synchronization, calls, safepoints, or a `trap`/`error` policy), `opcode`.
+
+## `Terminator`
+
+`Jump(BlockCall)`, `Branch { cond, then_dest, else_dest }`, `Switch { value, cases, default }`,
+`Return { values }`, `Unreachable`, `Trap { code }`, `TailCall(Box<Call>)`,
+`Invoke { call, normal, unwind }`, `Check { op, normal, error }`, `Resume { payload }`
+(`#[non_exhaustive]`). Methods: `successors()` (cases, then default; then/else; normal, then
+unwind/error), `for_each_successor_mut`, `for_each_operand`, `map_operands`, `opcode`.
+
+## Edges
+
+### `BlockCall`
+
+`{ block, args: Vec<BlockArg> }`; `new(block, &[Value])`, `with_args(block, &[BlockArg])`.
+
+### `BlockArg`
+
+`Value(Value)`, `Result(u32)` (`resN`), `Exception` (`exn`), `ErrorCode` (`err`)
+(`#[non_exhaustive]`). Where each is allowed is in IR.md §7.
 
 ```rust
-use ir_lang::{Builder, BinOp, Type, ValidationError};
+use ir_lang::{Block, BlockArg, BlockCall};
 
-// Well-formed.
-let mut b = Builder::new("f", &[Type::Int], Type::Int);
-let x = b.block_params(b.entry())[0];
-let two = b.iconst(2);
-let doubled = b.bin(BinOp::Mul, x, two);
-b.ret(Some(doubled));
-assert!(b.finish().validate().is_ok());
-
-// A block with no terminator is rejected.
-let unfinished = Builder::new("g", &[], Type::Unit).finish();
-assert!(matches!(
-    unfinished.validate(),
-    Err(ValidationError::MissingTerminator { .. })
-));
+let normal = BlockCall::with_args(Block::from_u32(1), &[BlockArg::Result(0)]);
+assert_eq!(normal.to_string(), "b1(res0)");
 ```
 
-### Textual form (`Display`)
+### `SwitchCase`
 
-`Function` implements `Display`, printing a readable textual IR — useful in tests and
-when debugging a pass.
+`{ value, dest }`; `value` is the raw bits of the case.
+
+### `Successors`
+
+The iterator returned by `Terminator::successors`.
+
+## Calls
+
+### `Call`
+
+`{ target, args, gc, attrs }`; `direct(FuncId, &[Value])`, `indirect(SigId, Value, &[Value])`,
+`with_gc(&[Value])`, `with_attrs(Attrs)`.
+
+### `CallTarget`
+
+`Direct(FuncId)` or `Indirect { sig, callee }` (`#[non_exhaustive]`).
+
+### `Attrs`
+
+A bit set: `NOUNWIND`, `NORETURN`, `NOGC` (checked), `READONLY`, `READNONE`, `COLD`,
+`NOINLINE`, `INLINE` (hints). `contains`, `union`, `|`, `is_empty`, `from_name`, `bits`;
+`Display` prints `[nounwind, cold]`.
+
+## Memory
+
+### `MemFlags`
+
+`{ align, volatile }`; `new(align)`, `volatile()`; `MAX_ALIGN` = 2^29.
+
+### `MemOrder`
+
+`Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`; `name`, `from_name`, `strength`.
+
+### `RmwOp`
+
+`Xchg`, `Add`, `Sub`, `And`, `Or`, `Xor`, `Nand`, `Min`, `Max`; `name`, `from_name`.
+
+## Operations
+
+`UnaryOp` (`neg abs not sqrt floor ceil trunc round round_even`), `BinaryOp` (`add sub mul div
+rem floor_div floor_mod ieee_rem and or xor shl shr min max total_cmp`), `CmpOp` (`eq ne lt le
+gt ge`), `ConvOp` (`int_cast zext sext narrow int_to_float float_to_int float_cast bitcast
+char_from_u32 bool_to_int ptr_to_int int_to_ptr ref_to_ptr`). Each has `ALL`, `name`,
+`from_name`, `Display`; all are `#[non_exhaustive]`. Semantics: OPS §3–§5.
+
+## Policy
 
 ```rust
-use ir_lang::{Builder, BinOp, Type};
+use ir_lang::{BinaryOp, DivZero, Overflow, Policy, Type};
 
-let mut b = Builder::new("double", &[Type::Int], Type::Int);
-let x = b.block_params(b.entry())[0];
-let sum = b.bin(BinOp::Add, x, x);
-b.ret(Some(sum));
-let text = b.finish().to_string();
-
-assert!(text.contains("fn double(int) -> int {"));
-assert!(text.contains("b0(v0: int):"));
-assert!(text.contains("v1: int = add v0, v0"));
-assert!(text.contains("return v1"));
+let p = Policy::overflow(Overflow::Wrap).with_div_zero(DivZero::Trap);
+assert!(Policy::required_binary(BinaryOp::Div, Type::I32).matches(p));
+assert!(!p.can_error());
+assert_eq!(p.to_string(), "<overflow=wrap,div_zero=trap>");
 ```
 
----
+`Policy { overflow, div_zero, shift, float_to_int }` (each optional). Constructors `NONE`,
+`overflow`, `div_zero`, `shift`, `float_to_int`, `with_div_zero`; `can_error`;
+`required_unary(UnaryOp, Type)`, `required_binary(BinaryOp, Type)`,
+`required_conversion(ConvOp)` give the [`PolicyFields`](#policy) an instance must carry
+(`matches`, `is_empty`). Field values: `Overflow { Error, Wrap, Trap }`,
+`DivZero { Error, Trap }`, `Shift { Error, Mask }`, `FloatToInt { Error, Saturate }`, each with
+`name`/`from_name`.
 
-## `ValidationError`
+### `OpError`
 
-The reason a function is not well-formed, returned by
-[`Function::validate`](#functionvalidate). It is `#[non_exhaustive]`, so a `match`
-must include a wildcard arm.
+`ArithOverflow` (1), `DivByZero` (2), `ShiftOutOfRange` (3), `InvalidConversion` (4),
+`InvalidChar` (5): the OPS §6 codes. `code`, `from_code`; `Display` prints `E0001
+ArithOverflow`.
 
-| Variant | Meaning |
-| ------- | ------- |
-| `MissingTerminator { block }` | a block has no terminator |
-| `BlockOutOfRange { block }` | a terminator targets a block that does not exist |
-| `ValueOutOfRange { value }` | a reference to a value that does not exist |
-| `EntryBranchTarget { block }` | a terminator branches to the entry block |
-| `ArgCountMismatch { block, expected, found }` | a jump/branch passes the wrong number of arguments |
-| `TypeMismatch { value, expected, found }` | a value is used where another type was required |
-| `NotNumeric { value, found }` | an arithmetic operation was applied to a non-numeric value |
-| `ReturnValueExpected { expected }` | a valueless `return` in a non-`Unit` function |
-| `UseBeforeDef { value, block }` | a value is used where its definition does not reach |
-| `InconsistentDefinition { value }` | a value's recorded definition disagrees with the block that lists it (hand-built / deserialized IR only) |
+## Errors
 
-`ValidationError` implements `Display` and `std::error::Error`. Because the validator
-checks the value table itself — handle ranges, definition sites, and result types —
-it is a complete gate for any `Function`, including one assembled by hand or
-deserialized through `serde`, not just one the [`Builder`](#builder) produced.
+### `ModuleError`
+
+Why a declaration was refused: `DuplicateName`, `EmptyName`, `UnknownFunction`,
+`UnknownGlobal`, `UnknownAggregate`, `AggregateTooLarge`, `BadAlignment`, `InitSizeMismatch`,
+`RelocOutOfRange`, `ImportWithData`, `CannotDefineImport`, `AlreadyDefined`, `NotDefined`,
+`CapacityExceeded`.
+
+### `BuildError`
+
+Why a builder operation was refused (nothing changed): `AlreadyTerminated`, `UnknownBlock`,
+`UnknownInst`, `UnknownValue`, `UnknownParam`, `EntryBlock`, `UnknownBlockParam`,
+`Invalid(ValidationErrorKind)`, `CapacityExceeded`.
 
 ```rust
-use ir_lang::{Builder, BinOp, Type, ValidationError};
+use ir_lang::{BuildError, Linkage, Module, Overflow, Signature, Type};
 
-let mut b = Builder::new("f", &[Type::Int, Type::Bool], Type::Int);
-let x = b.block_params(b.entry())[0];
-let flag = b.block_params(b.entry())[1];
-let bad = b.bin(BinOp::Add, x, flag);   // int + bool
-b.ret(Some(bad));
-
-match b.finish().validate() {
-    Err(ValidationError::TypeMismatch { found, .. }) => assert_eq!(found, Type::Bool),
-    other => panic!("expected a type mismatch, got {other:?}"),
-}
+let mut m = Module::new("m");
+let f = m.declare_function("f", &Signature::new(&[Type::I32], &[]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.param(0)?;
+// An `error` policy needs a `check` terminator.
+assert!(matches!(b.add(x, x, Overflow::Error), Err(BuildError::Invalid(_))));
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
----
+### `ValidationError`
+
+`func()`, `block()`, `inst()` (where), `kind()` (what); `Display` prints `f1 b2 inst3: …`.
+
+### `ValidationErrorKind`
+
+One variant per rule (IR.md §11), `#[non_exhaustive]`:
+
+| Group | Variants |
+|---|---|
+| Module | `DuplicateName`, `EmptyName`, `UnknownSignature`, `UnknownFunction`, `UnknownGlobal`, `UnknownAggregate`, `BadAggregate`, `BadAlignment`, `BadGlobal`, `MissingBody`, `ImportWithBody` |
+| Structure | `BadEntry`, `EntryParams`, `MissingTerminator`, `BadBlockTarget`, `EntryBranchTarget`, `CorruptLayout`, `ValueOutOfRange`, `InconsistentDefinition`, `DefinedTwice`, `UseOfDetached`, `BadAlias`, `UseBeforeDef`, `BadSlot` |
+| Typing | `TypeMismatch`, `BadOperandType`, `BadConversion`, `PolicyMismatch`, `ErrorOutsideCheck`, `NotFallible`, `BadConst`, `BadField`, `BadOrdering`, `ResultMismatch`, `ArgCount`, `EdgeArgCount`, `BadSwitchCase`, `BadTailCall`, `BadGcList` |
+| Exception edges | `BadEdgeArg`, `LandingPadPredecessor`, `UnwindInNounwind`, `ReturnInNoreturn`, `SafepointInNogc` |
+| Safepoints | `LiveAcrossSafepoint`, `DerivedPointerEscapes` |
+
+## `parse`
+
+`parse(&str) -> Result<Module, ParseError>` and `parse_with(&str, &ParseLimits)`. Syntax only;
+call `validate` afterwards. The printer's output parses back to the same module with the same
+handles.
+
+```rust
+let text = "module \"m\" ptr64\nsig s0 = (i32) -> (i32) fast\n\nfunc @id s0 export {\nb0(v0: i32):\n    ret v0\n}\n";
+let m = ir_lang::parse(text)?;
+m.validate()?;
+assert_eq!(m.to_string(), text);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### `ParseLimits`
+
+`{ max_bytes (default 256 MiB), max_id (default 2^26) }`. Entity ids are also capped at
+`64 × input length + 4096`.
+
+### `ParseError`
+
+`line()`, `column()` (1-based, characters), `kind()`.
+
+### `ParseErrorKind`
+
+`InputTooLarge`, `UnexpectedChar`, `UnterminatedString`, `BadEscape`, `Expected`,
+`UnknownOpcode`, `UnknownType`, `UnknownSymbol`, `BadNumber`, `IdTooLarge`, `OutOfOrder`,
+`Duplicate`, `Undefined`, `NonConsecutiveResults`, `MissingResult`, `Module(ModuleError)`
+(`#[non_exhaustive]`).
+
+## `interp` (feature `interp`)
+
+The reference interpreter: OPS semantics exactly, undefined behaviour reported as errors,
+iterative, budgeted.
+
+```rust
+# #[cfg(feature = "interp")] {
+use ir_lang::interp::{self, Outcome, Val};
+use ir_lang::{Linkage, Module, Overflow, Signature, Type};
+
+let mut m = Module::new("m");
+let f = m.declare_function("twice", &Signature::new(&[Type::U8], &[Type::U8]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.param(0)?;
+let y = b.add(x, x, Overflow::Trap)?;
+b.ret(&[y])?;
+assert_eq!(interp::run(&m, f, &[Val::u8(100)])?, Outcome::Return(vec![Val::u8(200)]));
+assert_eq!(interp::run(&m, f, &[Val::u8(200)])?, Outcome::Trap(1));
+# }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+| Item | Description |
+|---|---|
+| `run(&Module, FuncId, &[Val]) -> Result<Outcome, InterpError>` | Tier-1: default limits, no host. |
+| `Interpreter::new(&Module, H)`, `with_limits(…, Limits)` | Validates the module and lays out globals (relocations applied). Errors: `Invalid`, `OutOfMemory`. |
+| `Interpreter::call(FuncId, &[Val])` | Runs a function to completion; memory persists across calls. |
+| `memory()`, `memory_mut()`, `global_address(GlobalId)`, `fuel_used()`, `host_mut()` | Inspection. |
+| `Limits { fuel, max_depth, memory }` | Defaults 10M, 1000, 4 MiB (memory capped at 4 GiB). |
+| `Outcome` | `Return(Vec<Val>)`, `Unwind(Val)`, `Trap(u32)`. |
+| `InterpError` | `Invalid`, `UnresolvedImport`, `BadArguments`, `FuelExhausted`, `StackOverflow`, `OutOfMemory`, `MemoryFault`, `Misaligned`, `Overlap`, `InvalidBool`, `UnreachableReached`, `StaleRef`, `BadFunctionPointer`, `UncheckedError`, `Host`. |
+| `Val` | A typed bit pattern: `new`, `i8`…`u64`, `f32`, `f64`, `bool`, `ptr`; `ty`, `bits`, `as_i128`, `as_f64`, `as_bool`, `same_as` (NaN-equivalent). |
+| `Memory` | `read`, `write`, `alloc` (host heap), `alloc_object` (a GC object; returns a `ref`), `ref_address`. |
+| `Host`, `HostReturn`, `NoHost` | Implement imported functions. |
+| `eval_unary`, `eval_binary`, `eval_compare`, `eval_convert`, `eval_fma`, `OpFault` | Per-operation OPS semantics on bits, for constant folding. |
+
+Every safepoint starts a new GC epoch; using a reference from an earlier epoch is `StaleRef`, so
+a missing relocation is caught at run time.
 
 ## Feature flags
 
-| Feature | Default | Description |
-| ------- | ------- | ----------- |
-| `std`   | yes     | Standard-library support. With it disabled the crate is `#![no_std]` and runs on `alloc` alone. |
-| `serde` | no      | Derives `serde::Serialize` / `Deserialize` for the IR types ([`Type`](#type), [`Value`](#value), [`Block`](#block), [`BinOp`](#binop), [`UnOp`](#unop), [`Inst`](#inst), [`Terminator`](#terminator), [`Function`](#function), and [`ValidationError`](#validationerror)) so a function can be cached, inspected, or moved between tools. |
+| Feature | Default | Effect |
+|---|---|---|
+| `std` | yes | The standard library; without it the crate is `no_std` + `alloc`. |
+| `interp` | no | The [`interp`](#interp-feature-interp) module (implies `std`). |
 
-Features are additive: enabling one never removes or changes behaviour provided by
-another, per the project's SemVer policy.
+## Limits
 
----
+| Limit | Value |
+|---|---|
+| Entities per function (values, blocks, instructions, slots) | `MAX_ENTITIES` = 2^32 − 2 |
+| Aggregate size | 2^48 bytes |
+| Global / stack slot alignment | 2^16 |
+| Access alignment (`MemFlags`) | 2^29 |
+| Parser input | 256 MiB by default (`ParseLimits`) |
 
-## SemVer promise
+## Stability
 
-As of `1.0.0` the public surface is frozen. The crate follows
-[Semantic Versioning](https://semver.org):
-
-- No documented item is removed or changed in a breaking way within `1.x`; breaking
-  changes wait for `2.0`.
-- New functionality is additive and arrives in minor releases. [`ValidationError`](#validationerror)
-  is `#[non_exhaustive]`, so a new error variant is a minor change, not a breaking
-  one; a `match` on it must keep a wildcard arm. The instructions and types
-  ([`Inst`](#inst), [`Terminator`](#terminator), [`Type`](#type), [`BinOp`](#binop),
-  [`UnOp`](#unop)) may likewise gain variants in a minor release.
-- The MSRV is Rust `1.85`; raising it is a minor change, never a patch.
-- Behaviour is part of the contract: a function that validates today keeps
-  validating, and the textual `Display` form is stable for a given function.
-
-This file is updated in lockstep with every release so it always matches the code.
-
-<sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
+`2.0.0-alpha.1` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
+[`CHANGELOG.md`](../CHANGELOG.md). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
+new types, operations, terminators, and error kinds are additive. MSRV is 1.85.

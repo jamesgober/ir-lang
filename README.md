@@ -18,17 +18,47 @@
 
 <div align="left">
     <p>
-        ir-lang is the intermediate representation a compiler optimizes and lowers code through. A <code>Function</code> is a control-flow graph of basic blocks in SSA form: each block is a straight-line run of value-producing instructions ended by one terminator, and every value is named by a small handle and defined exactly once. There is no AST type to lower <em>from</em> &mdash; a language brings its own syntax tree &mdash; so lowering is expressed through a <code>Builder</code>, the same shape as Cranelift's <code>FunctionBuilder</code> or LLVM's <code>IRBuilder</code>. It is a SEMA-tier crate of the <code>-lang</code> language-construction family.
+        <strong>ir-lang</strong> is the SSA intermediate representation of a native compiler: what a front end lowers into after monomorphization, closure conversion, pattern compilation, and effect lowering, what an optimizer rewrites, and what instruction selection reads. A <code>Module</code> holds functions, globals, and aggregate types; a function is a control-flow graph whose blocks take <strong>parameters</strong> instead of phi nodes, and every value has one type and one definition.
+    </p>
+    <p>
+        The instruction set covers every operation of the family's shared operation semantics with its overflow, division, shift, and conversion <strong>policy on each instance</strong>, so every tier computes the same result; calls (direct, indirect, tail) and <code>invoke</code> with exception edges; operation errors routed to explicit error edges; memory with alignment, volatility, atomics, and address computation; and <strong>safepoints that relocate GC references</strong>, so native frames can be scanned by a moving collector. A validator checks all of it, a builder doubles as a rewrite API for optimization passes, a printer and a budgeted parser round-trip exactly, and a reference interpreter implements the semantics as the oracle for optimizers and backends. It is a SEMA/CODE-tier crate of the <code>-lang</code> language-construction family.
     </p>
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>no_std</code>-compatible (needs only <code>alloc</code>; the interpreter needs <code>std</code>), <code>#![forbid(unsafe_code)]</code>, no dependencies.
     </p>
     <blockquote>
-        <strong>Status: stable (1.0).</strong> The public API is frozen and follows Semantic Versioning &mdash; no breaking changes before <code>2.0</code>. See <a href="./docs/API.md#semver-promise"><code>the SemVer promise</code></a> and <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>2.0.0-alpha.1 is a pre-release</strong> of the 2.0 redesign. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is <code>_lexersketch/specs/IR.md</code>; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
     </blockquote>
 </div>
+
+<hr>
+<br>
+
+## The model
+
+- A **[`Module`](./docs/API.md#module)** declares functions (with a [`Signature`](./docs/API.md#signature) and a calling-convention tag, a linkage, and attributes), [globals](./docs/API.md#global) with initializers and relocations, and [aggregates](./docs/API.md#aggregate) (structs, packed structs, arrays) with C layout.
+- A **[`Function`](./docs/API.md#function)** body is blocks of [instructions](./docs/API.md#instdata) ended by one [terminator](./docs/API.md#terminator). Values cross edges as block arguments.
+- A **[`Builder`](./docs/API.md#builder)** lowers into a body and rewrites it. Every instruction is type-checked as it is added.
+- **[`Module::validate`](./docs/API.md#modulevalidate)** checks everything; **`Display`** and **[`parse`](./docs/API.md#parse)** are the textual form.
+- **[`interp`](./docs/API.md#interp-feature-interp)** (feature `interp`) runs it.
+
+<br>
+
+What it guarantees, and how each guarantee is checked:
+
+| Guarantee | How it is held |
+|---|---|
+| A well-typed program built with the builder validates. | Property tests lower thousands of random programs (loops, calls, invokes, tail calls, memory, globals, checked arithmetic, exceptions) and validate each. |
+| Dominance and the safepoint rule are decided exactly. | Property tests compare the validator with brute-force references on random control-flow graphs (loops, unreachable blocks, block parameters): dominance by path removal, reference liveness by path search. |
+| Validation is total: it accepts or reports, never panics. | A sweep corrupts internal state thousands of times; property tests validate mutated text and the results of hostile rewrites. |
+| Operations follow `specs/OPS.md` exactly, on every type and policy. | The interpreter is compared against independent reference arithmetic on the OPS edge values of every integer type and policy, IEEE special cases, and exact rational checks of `ieee_rem`. |
+| Lowered programs mean what the source means. | Differential tests run each random program in an independent evaluator and, lowered, in the interpreter, before and after a print/parse round trip; results, traps, and exceptions agree exactly. |
+| The textual form round-trips exactly. | `parse(print(m))` prints identically and keeps every handle, over random programs and a module containing every instruction form. |
+| Rewrites keep IR valid and meaning intact. | Random sequences of rewrites (split, duplicate-and-forward, remove dead code, swap operands, compact) are validated after every step and the result run against the evaluator. |
+| GC references are never live across a safepoint without relocation. | The validator enforces it; the interpreter starts a new GC epoch at every safepoint and reports any stale reference. |
+| Hostile input is bounded. | The parser caps input size and entity ids; the interpreter caps fuel, depth, and memory; every walk is iterative. Fuzzed with random and mutated text. |
 
 <hr>
 <br>
@@ -37,134 +67,136 @@
 
 ```toml
 [dependencies]
-ir-lang = "1.0"
+ir-lang = "2.0.0-alpha.1"
 ```
 
-Or from the terminal:
+With the reference interpreter:
 
-```bash
-cargo add ir-lang
+```toml
+[dependencies]
+ir-lang = { version = "2.0.0-alpha.1", features = ["interp"] }
 ```
 
+Without the standard library:
+
+```toml
+[dependencies]
+ir-lang = { version = "2.0.0-alpha.1", default-features = false }
+```
+
+<hr>
 <br>
 
-## Usage
+## Quick start
 
-A front-end walks its own syntax tree and drives the `Builder`: a literal becomes a
-constant, an operator becomes an instruction, an `if` becomes two blocks and a
-branch, a join becomes a block parameter. The builder hands back a `Value` for every
-result, so SSA numbering is captured without tracking it by hand. When the function
-is built, `validate` confirms it is well-formed.
-
-Lowering `fn abs(x: int) -> int { if x < 0 { -x } else { x } }`:
+Build, validate, print, and parse back `fn add1(x: i64) -> i64 { x + 1 }`:
 
 ```rust
-use ir_lang::{Builder, BinOp, Type, UnOp};
+use ir_lang::{Linkage, Module, Overflow, Signature, Type};
 
-let mut b = Builder::new("abs", &[Type::Int], Type::Int);
-let x = b.block_params(b.entry())[0];
+let mut m = Module::new("demo");
+let f = m.declare_function("add1", &Signature::new(&[Type::I64], &[Type::I64]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.param(0)?;
+let one = b.iconst(Type::I64, 1)?;
+let y = b.add(x, one, Overflow::Wrap)?;
+b.ret(&[y])?;
 
-// The merge point takes the result as a parameter.
-let join = b.create_block(&[Type::Int]);
-let neg_blk = b.create_block(&[]);
-let pos_blk = b.create_block(&[]);
-
-let zero = b.iconst(0);
-let is_neg = b.bin(BinOp::Lt, x, zero);
-b.branch(is_neg, neg_blk, &[], pos_blk, &[]);
-
-b.switch_to(neg_blk);
-let negated = b.un(UnOp::Neg, x);
-b.jump(join, &[negated]);
-
-b.switch_to(pos_blk);
-b.jump(join, &[x]);
-
-b.switch_to(join);
-let result = b.block_params(join)[0];
-b.ret(Some(result));
-
-let func = b.finish();
-assert!(func.validate().is_ok());
+m.validate()?;
+assert_eq!(
+    m.to_string(),
+    "module \"demo\" ptr64\nsig s0 = (i64) -> (i64) fast\n\nfunc @add1 s0 export {\nb0(v0: i64):\n    v1: i64 = const 1\n    v2: i64 = add<overflow=wrap> v0, v1\n    ret v2\n}\n"
+);
+assert_eq!(ir_lang::parse(&m.to_string())?.to_string(), m.to_string());
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-A function prints as a readable textual IR, which is handy in tests and when
-debugging a pass:
+### Errors and exceptions are edges
+
+An operation whose policy is `error` is a `check` terminator with an error edge carrying the OPS error code; a call that may throw is an `invoke` with a landing pad:
 
 ```rust
-use ir_lang::{Builder, BinOp, Type};
+use ir_lang::{BinaryOp, BlockArg, BlockCall, Call, InstData, Linkage, Module, Overflow, Policy, Signature, Type};
 
-let mut b = Builder::new("poly", &[Type::Int, Type::Int], Type::Int);
-let a = b.block_params(b.entry())[0];
-let c = b.block_params(b.entry())[1];
-let sum = b.bin(BinOp::Add, a, c);
-let diff = b.bin(BinOp::Sub, a, c);
-let product = b.bin(BinOp::Mul, sum, diff);
-b.ret(Some(product));
+let mut m = Module::new("demo");
+let may_throw = m.declare_function("may_throw", &Signature::new(&[], &[Type::I32]), Linkage::Import)?;
+let f = m.declare_function("f", &Signature::new(&[Type::I32], &[Type::I32]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.param(0)?;
+let got = b.create_block(&[Type::I32])?;
+let pad = b.create_block(&[Type::Ptr])?;
+b.invoke(
+    Call::direct(may_throw, &[]),
+    BlockCall::with_args(got, &[BlockArg::Result(0)]),
+    BlockCall::with_args(pad, &[BlockArg::Exception]),
+)?;
 
-let text = b.finish().to_string();
-assert!(text.contains("v4: int = mul v2, v3"));
-assert!(text.contains("return v4"));
+b.switch_to(got)?;
+let y = b.block_param(got, 0)?;
+let sum = b.create_block(&[Type::I32])?;
+let overflow = b.create_block(&[Type::U32])?;
+b.check(
+    InstData::Binary { op: BinaryOp::Add, policy: Policy::overflow(Overflow::Error), args: [x, y] },
+    BlockCall::with_args(sum, &[BlockArg::Result(0)]),
+    BlockCall::with_args(overflow, &[BlockArg::ErrorCode]),
+)?;
+b.switch_to(sum)?;
+let s = b.block_param(sum, 0)?;
+b.ret(&[s])?;
+b.switch_to(overflow)?;
+b.trap(1)?;
+b.switch_to(pad)?;
+let exn = b.block_param(pad, 0)?;
+b.resume(exn)?;
+
+m.validate()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Construction does not check well-formedness as it goes; `validate` does, returning a
-defined error rather than panicking when the IR is wrong:
+### Running it
+
+With the `interp` feature, the reference interpreter runs a module with the exact operation semantics:
 
 ```rust
-use ir_lang::{Builder, BinOp, Type, ValidationError};
+# #[cfg(feature = "interp")] {
+use ir_lang::interp::{self, Outcome, Val};
+use ir_lang::{Linkage, Module, Overflow, Signature, Type};
 
-// `int + bool` is not a valid operation.
-let mut b = Builder::new("bad", &[Type::Int, Type::Bool], Type::Int);
-let x = b.block_params(b.entry())[0];
-let flag = b.block_params(b.entry())[1];
-let oops = b.bin(BinOp::Add, x, flag);
-b.ret(Some(oops));
+let mut m = Module::new("demo");
+let f = m.declare_function("add1", &Signature::new(&[Type::I64], &[Type::I64]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.param(0)?;
+let one = b.iconst(Type::I64, 1)?;
+let y = b.add(x, one, Overflow::Trap)?;
+b.ret(&[y])?;
 
-assert!(matches!(
-    b.finish().validate(),
-    Err(ValidationError::TypeMismatch { .. })
-));
+assert_eq!(interp::run(&m, f, &[Val::i64(41)])?, Outcome::Return(vec![Val::i64(42)]));
+assert_eq!(interp::run(&m, f, &[Val::i64(i64::MAX)])?, Outcome::Trap(1)); // E0001
+# }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-See <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference, and
-<a href="./examples/"><code>examples/</code></a> for runnable demonstrations
-(`cargo run --example lower_ast`, `cargo run --example validation`).
+More in [`examples/`](./examples): `lower` (a front end's tree into IR), `rewrite` (a folding pass with the rewrite API), `run` (the interpreter).
 
+<hr>
 <br>
 
-## How it works
+## Performance
 
-A `Function` keeps its blocks and values in flat arenas addressed by dense `Block`
-and `Value` indices, so building and walking the IR is a linear pass over
-contiguous memory rather than a chase through pointers, and a pass can key a side
-table directly on a handle's index. Values cross control-flow joins as block
-parameters — a `jump` or `branch` passes one argument per target parameter — which
-keeps the representation flat and removes the bookkeeping of phi nodes.
+Measured with `cargo bench` (criterion) on the development machine (Windows, x86-64), library only. Throughput scales linearly from 100k to 1M instructions.
 
-`validate` is where correctness is enforced. It checks the structural rules (one
-terminator per block, branch targets that exist, argument counts and types that
-match the target parameters, a numeric or boolean operand where the operation
-requires it) and then the SSA dominance property: every use of a value is reached by
-its single definition. Dominators are computed with the Cooper–Harvey–Kennedy
-algorithm over the reachable graph, and the dominance check is a single linear walk
-of the dominator tree carrying one reused availability set — no per-block allocation.
-The reachability, dominator, and dominance walks all use an explicit stack, so a
-deeply nested function cannot overflow the call stack.
+| Operation (1M instructions) | Time | Throughput |
+|---|---|---|
+| Build, straight line | 49 ms | 20 M instructions/s |
+| Build, chain of diamonds (250k blocks) | 134 ms | 7.5 M/s |
+| Validate, straight line | 34 ms | 30 M/s |
+| Validate, diamonds | 120 ms | 8.3 M/s |
+| Print, diamonds | 244 ms | 4.1 M/s |
+| Parse, diamonds | 652 ms | 1.5 M/s |
+| Compact, diamonds | 144 ms | 7.0 M/s |
+| Validate 100k safepoints relocating a reference | 12 ms | 8.1 M/s |
 
-<br>
-
-## Status
-
-<code>v1.0.0</code> is the stable release: the public API is frozen and follows
-Semantic Versioning, with no breaking changes before <code>2.0</code>. The surface is
-the IR core — the `Function` SSA control-flow graph, the `Builder` lowering interface,
-the textual `Display`, and `validate` — and the crate is self-contained: it defines
-its own machine-level `Type` and is driven entirely through the builder, so it pulls
-in no first-party dependency; a front-end maps its own AST and source types onto the
-IR. Every core invariant is property-tested against generated programs, the dominator
-and dominance algorithms were fuzzed against a brute-force reference, and the suite is
-verified on Linux, macOS, and Windows. See the
-<a href="./docs/API.md#semver-promise"><code>SemVer promise</code></a>.
+The textual form is for tests and debugging; nothing on the compile path parses text.
 
 <hr>
 <br>

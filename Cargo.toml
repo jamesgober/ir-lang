@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "ir-lang"
-version = "1.0.0"
+version = "2.0.0-alpha.1"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -16,10 +16,10 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Intermediate representation and lowering from the AST."
+description = "SSA intermediate representation for native compilation: modules, calls, memory, exception edges, safepoints, a validator, a rewrite API, and a textual form."
 
 # Keywords (5 max)
-keywords = ["compiler", "language", "ir", "lowering"]
+keywords = ["compiler", "ir", "ssa", "codegen", "lexersketch"]
 
 # Categories
 categories = ["development-tools", "compilers"]
@@ -46,25 +46,41 @@ path = "src/lib.rs"
 [features]
 default = ["std"]
 std = []
-# Serialization support.
-serde = ["dep:serde"]
+# The reference interpreter (OPS semantics oracle). Needs `std` for the IEEE
+# float functions (sqrt, fma, rounding) that `core` does not provide on stable.
+interp = ["std"]
 
 
 # DEPENDENCIES
 # #################################
+# None: the IR, validator, printer, parser, and interpreter are self-contained.
 [dependencies]
-serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
-criterion  = { version = "0.5", features = ["html_reports"] }
-proptest   = "1"
-serde_json = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest  = "1"
 
-[target.'cfg(loom)'.dev-dependencies]
-loom = "0.7"
+
+# TESTS AND EXAMPLES THAT RUN THE INTERPRETER
+# #################################
+[[test]]
+name              = "interp"
+required-features = ["interp"]
+
+[[test]]
+name              = "differential"
+required-features = ["interp"]
+
+[[test]]
+name              = "rewrite"
+required-features = ["interp"]
+
+[[example]]
+name              = "run"
+required-features = ["interp"]
 
 
 # BENCHMARKS

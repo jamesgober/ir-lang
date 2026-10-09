@@ -12,7 +12,20 @@ This library is built and maintained to a production standard and treated as a f
 
 ## 1. What this is
 
-ir-lang defines the intermediate representation a compiler optimizes and lowers code through, and the AST-to-IR lowering that produces it. It takes a type-checked AST — the program a front-end has already parsed and resolved — and lowers it into a flat, explicit form: functions made of basic blocks, each block a straight-line sequence of instructions ending in a single terminator, with values named by stable handles rather than by tree position. That form is what optimization passes rewrite and what backends read. It sits in the SEMA tier of the `-lang` language-construction family, above [`ast-lang`](https://docs.rs/ast-lang) (the tree it lowers from) and [`type-lang`](https://docs.rs/type-lang) (the types it lowers against), and below the pass manager and the code generators that consume it. It owns the IR and the lowering only — no parsing, no name resolution, no register allocation, no code emission. Those live in their own crates.
+ir-lang is the SSA intermediate representation of the family's native compiler path (2.0;
+normative spec: `_lexersketch/specs/IR.md`). A front end lowers into it after
+monomorphization, closure conversion, pattern compilation, and effect lowering; opt-lang
+rewrites it; instruction selection reads it into backend-lang MIR. A `Module` holds functions
+(signatures with calling-convention tags, linkage, attributes), globals with relocations, and
+aggregate types; a function body is a control-flow graph of blocks with block parameters (no
+phi nodes). Instructions cover every operation of `specs/OPS.md` with its policy on the
+instance, conversions, comparisons, `select`, calls (direct, indirect, tail), `invoke` with an
+exception edge, `check` with an error edge, memory (stack slots, loads/stores with alignment and
+volatility, atomics, `memcpy`/`memset`, address computation), and safepoints that relocate GC
+references. It owns the IR, its builder and rewrite API, its validator, its textual form, and a
+reference interpreter (feature `interp`) that is the semantic oracle. It does not own parsing of
+source, name resolution, type inference, optimization passes, instruction selection, register
+allocation, or encoding. Bytecode (LSB) does not pass through it (D19).
 
 ---
 
@@ -43,10 +56,36 @@ ir-lang defines the intermediate representation a compiler optimizes and lowers 
 
 ## 4. Project-specific invariants
 
-- Every basic block ends in exactly one terminator instruction, and a terminator appears only as the last instruction of its block.
-- Every branch or jump targets a block that exists in the same function; there are no dangling block references.
-- Every value is defined exactly once and every use of a value is dominated by its definition — no use-before-def, no redefinition.
-- A value handle, block handle, and function handle is unique and stable for the life of the IR unit it belongs to; it never silently rebinds to a different entity.
-- A well-typed AST lowers to IR that passes validation, and lowering never loses an observable side effect or reorders one past another in a way that changes program meaning.
-- Validation is total: any IR unit either passes with a well-formedness guarantee or is rejected with a defined error that points at the offending instruction — it never reports success on malformed IR.
-- Lowering and validation are deterministic: the same AST always produces the same IR, independent of incidental ordering beyond what the rules specify.
+Each is property-tested (file in brackets).
+
+- **Builder output validates**: a well-typed program lowered through the builder passes
+  validation. [`tests/proptest.rs` `prop_builder_output_validates`, `tests/differential.rs`]
+- **Validation is total**: any module, including corrupted internal state and mutated text,
+  is accepted or rejected with a defined error, never a panic. [`src/validate/tests.rs`
+  corruption sweep, `tests/proptest.rs` `prop_validator_never_panics_on_mutated_text`,
+  `tests/rewrite.rs` `prop_hostile_rewrites_never_panic`]
+- **Single definition and dominance**: every value is defined once, and every use in a reachable
+  block is dominated by its definition; the entry block's parameters equal the signature's.
+  [`tests/brute.rs` `prop_dominance_matches_brute_force` (against path-removal dominance on
+  random CFGs), `tests/validate.rs`, `src/validate/tests.rs`]
+- **Exact policies**: every operation instance carries exactly the policy fields OPS requires;
+  `error` policies only inside `check`; `promote` is unrepresentable. [`tests/validate.rs`,
+  `tests/parse.rs`]
+- **OPS semantics**: the interpreter computes exactly OPS on every type, policy, and edge value.
+  [`tests/interp.rs` reference comparisons, `tests/differential.rs`]
+- **Safepoint rule**: no GC reference or pointer derived from one is live across a safepoint, and
+  derived pointers never escape. [`tests/brute.rs` `prop_safepoint_liveness_matches_brute_force`
+  (against path search on random CFGs with block-parameter references), `tests/validate.rs`,
+  interpreter epoch checks in `tests/interp.rs`]
+- **Round trip**: `parse(print(m))` prints identically and keeps every value, block, slot,
+  signature, aggregate, function, and global handle. [`tests/proptest.rs`
+  `prop_print_parse_round_trip`, `tests/parse.rs` `SINK`]
+- **Stable handles under rewriting**: no mutation renumbers except `compact`, which returns the
+  mapping; rewrites that preserve meaning keep the IR valid and its behaviour identical.
+  [`tests/rewrite.rs` `prop_rewrites_keep_ir_valid_and_meaning`, `prop_compact_round_trips`]
+- **No silent overwrite**: a terminator is never replaced implicitly. [`src/builder.rs` tests]
+- **Determinism**: lowering, printing, validation, and interpretation are deterministic.
+  [`tests/proptest.rs` `prop_lowering_is_deterministic`]
+- **Bounded on hostile input**: the parser caps input size and entity ids; the interpreter caps
+  fuel, depth, and memory; every walk is iterative. [`tests/parse.rs` budgets,
+  `tests/interp.rs` budgets]

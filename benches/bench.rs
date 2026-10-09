@@ -1,85 +1,139 @@
-//! Benchmarks for the two hot paths: constructing IR with the [`Builder`] and
-//! checking it with [`Function::validate`]. Both are measured on a straight-line
-//! function and on a control-flow-heavy chain of diamonds, since the validator's
-//! dominance pass scales with the shape of the graph, not just its size.
+//! Benchmarks at realistic scale (100k and 1M instructions): building,
+//! validating, printing, parsing, and compacting; plus the safepoint check with
+//! many relocated references.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use ir_lang::{BinOp, Builder, Function, Type};
 use std::hint::black_box;
 
-/// Builds `fn(int) -> int` whose body is `n` chained arithmetic operations over a
-/// single straight-line block.
-fn build_straightline(n: usize) -> Function {
-    let mut b = Builder::new("straightline", &[Type::Int], Type::Int);
-    let mut acc = b.block_params(b.entry())[0];
-    for i in 0..n {
-        let k = b.iconst(i as i64);
-        acc = b.bin(BinOp::Add, acc, k);
-    }
-    b.ret(Some(acc));
-    b.finish()
-}
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use ir_lang::{Call, CmpOp, FuncId, Linkage, Module, Overflow, Signature, Type};
 
-/// Builds `fn(int) -> int` whose body is `n` nested `if`/`else` diamonds, each
-/// threading its result through a join block — `3n + 1` blocks of control flow.
-fn build_diamonds(n: usize) -> Function {
-    let mut b = Builder::new("diamonds", &[Type::Int], Type::Int);
-    let mut acc = b.block_params(b.entry())[0];
+/// One block of `n` dependent additions.
+fn straight_line(n: usize) -> (Module, FuncId) {
+    let mut m = Module::new("bench");
+    let f = m
+        .declare_function(
+            "f",
+            &Signature::new(&[Type::I64], &[Type::I64]),
+            Linkage::Export,
+        )
+        .unwrap();
+    let mut b = m.build(f).unwrap();
+    let mut acc = b.param(0).unwrap();
+    let one = b.iconst(Type::I64, 1).unwrap();
     for _ in 0..n {
-        let zero = b.iconst(0);
-        let cond = b.bin(BinOp::Gt, acc, zero);
-        let join = b.create_block(&[Type::Int]);
-        let then_blk = b.create_block(&[]);
-        let else_blk = b.create_block(&[]);
-        b.branch(cond, then_blk, &[], else_blk, &[]);
-
-        b.switch_to(then_blk);
-        let one = b.iconst(1);
-        let inc = b.bin(BinOp::Add, acc, one);
-        b.jump(join, &[inc]);
-
-        b.switch_to(else_blk);
-        let neg = b.bin(BinOp::Sub, acc, acc);
-        b.jump(join, &[neg]);
-
-        b.switch_to(join);
-        acc = b.block_params(join)[0];
+        acc = b.add(acc, one, Overflow::Wrap).unwrap();
     }
-    b.ret(Some(acc));
-    b.finish()
+    b.ret(&[acc]).unwrap();
+    (m, f)
 }
 
-fn bench_build(c: &mut Criterion) {
-    let mut group = c.benchmark_group("build");
-    for &n in &[16usize, 256, 1024] {
-        group.bench_with_input(BenchmarkId::new("straightline", n), &n, |bench, &n| {
-            bench.iter(|| build_straightline(black_box(n)));
-        });
-        group.bench_with_input(BenchmarkId::new("diamonds", n), &n, |bench, &n| {
-            bench.iter(|| build_diamonds(black_box(n)));
-        });
+/// About `n` instructions in a chain of diamonds (a branch, two arms, a join with
+/// a block parameter), so the dominator tree and the CFG are large too.
+fn diamonds(n: usize) -> (Module, FuncId) {
+    let mut m = Module::new("bench");
+    let f = m
+        .declare_function(
+            "f",
+            &Signature::new(&[Type::I64], &[Type::I64]),
+            Linkage::Export,
+        )
+        .unwrap();
+    let mut b = m.build(f).unwrap();
+    let mut acc = b.param(0).unwrap();
+    let mut emitted = 0;
+    while emitted < n {
+        let zero = b.iconst(Type::I64, 0).unwrap();
+        let c = b.compare(CmpOp::Lt, acc, zero).unwrap();
+        let t = b.create_block(&[]).unwrap();
+        let e = b.create_block(&[]).unwrap();
+        let j = b.create_block(&[Type::I64]).unwrap();
+        b.branch(c, t, &[], e, &[]).unwrap();
+        b.switch_to(t).unwrap();
+        let x = b.sub(zero, acc, Overflow::Wrap).unwrap();
+        b.jump(j, &[x]).unwrap();
+        b.switch_to(e).unwrap();
+        let y = b.add(acc, acc, Overflow::Wrap).unwrap();
+        b.jump(j, &[y]).unwrap();
+        b.switch_to(j).unwrap();
+        acc = b.block_param(j, 0).unwrap();
+        emitted += 4;
     }
-    group.finish();
+    b.ret(&[acc]).unwrap();
+    (m, f)
 }
 
-fn bench_validate(c: &mut Criterion) {
-    let mut group = c.benchmark_group("validate");
-    for &n in &[16usize, 256, 1024] {
-        let straight = build_straightline(n);
-        group.bench_with_input(
-            BenchmarkId::new("straightline", n),
-            &straight,
-            |bench, f| {
-                bench.iter(|| black_box(f).validate());
-            },
-        );
-        let diamonds = build_diamonds(n);
-        group.bench_with_input(BenchmarkId::new("diamonds", n), &diamonds, |bench, f| {
-            bench.iter(|| black_box(f).validate());
-        });
+/// `n` calls that are safepoints, each relocating the same reference.
+fn safepoints(n: usize) -> Module {
+    let mut m = Module::new("bench");
+    let poll = m
+        .declare_function("poll", &Signature::new(&[], &[]), Linkage::Import)
+        .unwrap();
+    let f = m
+        .declare_function(
+            "f",
+            &Signature::new(&[Type::Ref], &[Type::Ref]),
+            Linkage::Export,
+        )
+        .unwrap();
+    let mut b = m.build(f).unwrap();
+    let mut r = b.param(0).unwrap();
+    for _ in 0..n {
+        let c = b.call(Call::direct(poll, &[]).with_gc(&[r])).unwrap();
+        r = b.results(c).first().unwrap();
     }
-    group.finish();
+    b.ret(&[r]).unwrap();
+    m
 }
 
-criterion_group!(benches, bench_build, bench_validate);
+fn bench(c: &mut Criterion) {
+    for &n in &[100_000usize, 1_000_000] {
+        let mut g = c.benchmark_group(format!("ir-{n}"));
+        g.sample_size(10);
+        g.throughput(Throughput::Elements(n as u64));
+
+        g.bench_function(BenchmarkId::new("build", "straight"), |bch| {
+            bch.iter(|| black_box(straight_line(n)))
+        });
+        g.bench_function(BenchmarkId::new("build", "diamonds"), |bch| {
+            bch.iter(|| black_box(diamonds(n)))
+        });
+
+        let (straight, _) = straight_line(n);
+        let (cfg, f) = diamonds(n);
+        g.bench_function(BenchmarkId::new("validate", "straight"), |bch| {
+            bch.iter(|| straight.validate().unwrap())
+        });
+        g.bench_function(BenchmarkId::new("validate", "diamonds"), |bch| {
+            bch.iter(|| cfg.validate().unwrap())
+        });
+
+        let text = cfg.to_string();
+        g.bench_function(BenchmarkId::new("print", "diamonds"), |bch| {
+            bch.iter(|| black_box(cfg.to_string()))
+        });
+        g.bench_function(BenchmarkId::new("parse", "diamonds"), |bch| {
+            bch.iter(|| black_box(ir_lang::parse(&text).unwrap()))
+        });
+        g.bench_function(BenchmarkId::new("compact", "diamonds"), |bch| {
+            bch.iter_batched(
+                || cfg.clone(),
+                |mut m| {
+                    let mut b = m.edit(f).unwrap();
+                    black_box(b.compact());
+                },
+                criterion::BatchSize::LargeInput,
+            )
+        });
+        g.finish();
+    }
+
+    let mut g = c.benchmark_group("safepoints-100000");
+    g.sample_size(10);
+    g.throughput(Throughput::Elements(100_000));
+    let m = safepoints(100_000);
+    g.bench_function("validate", |bch| bch.iter(|| m.validate().unwrap()));
+    g.finish();
+}
+
+criterion_group!(benches, bench);
 criterion_main!(benches);
