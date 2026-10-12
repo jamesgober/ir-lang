@@ -1,6 +1,6 @@
 # ir-lang &mdash; API Reference
 
-> Complete reference for every public item in `ir-lang` 2.0.0-alpha.1, with examples.
+> Complete reference for every public item in `ir-lang` 2.0.0-alpha.2, with examples.
 > **Status: pre-release.** The surface may change before `2.0.0`; see
 > [`../dev/ROADMAP.md`](../dev/ROADMAP.md). The normative semantics are
 > `_lexersketch/specs/IR.md` (the IR) and `_lexersketch/specs/OPS.md` (operations).
@@ -27,6 +27,8 @@
 - [`Function`](#function)
 - [Handles: `Value`, `Block`, `Inst`, `StackSlot`, `FuncId`, `GlobalId`, `SigId`, `AggId`, `ValueRange`](#handles-1)
 - [`Builder`](#builder)
+  - [SSA construction: `Variable`, `declare_var`, `def_var`, `use_var`, `seal_block`](#ssa-construction)
+  - [`Builder::insert_statepoints`, `insert_statepoints_within`, `StatepointStats`, `DEFAULT_STATEPOINT_BUDGET`](#builderinsert_statepoints)
 - [`InstData`](#instdata)
 - [`Terminator`](#terminator)
 - [Edges: `BlockCall`, `BlockArg`, `SwitchCase`, `Successors`](#edges)
@@ -34,6 +36,7 @@
 - [Memory: `MemFlags`, `MemOrder`, `RmwOp`](#memory)
 - [Operations: `UnaryOp`, `BinaryOp`, `CmpOp`, `ConvOp`](#operations)
 - [Policies: `Policy`, `PolicyFields`, `Overflow`, `DivZero`, `Shift`, `FloatToInt`, `OpError`](#policy)
+- [`ls_pow`](#ls_pow)
 - [Errors: `ModuleError`, `BuildError`, `ValidationError`, `ValidationErrorKind`](#errors)
 - [`parse`](#parse)
 - [`interp` (feature `interp`)](#interp-feature-interp)
@@ -46,7 +49,10 @@
 | Item | Kind | Purpose |
 |---|---|---|
 | [`Module`](#module) | struct | Declarations and function bodies; validation; printing. |
-| [`Builder`](#builder) | struct | Lowers into a body and rewrites it. |
+| [`Builder`](#builder) | struct | Lowers into a body and rewrites it; constructs SSA from mutable variables; inserts statepoints. |
+| [`Variable`](#ssa-construction) | handle | A mutable local of SSA construction. |
+| [`StatepointStats`](#builderinsert_statepoints) | struct | What statepoint insertion changed. |
+| [`ls_pow`](#ls_pow) | function | The family's shared float `pow` routine (OPS v2), bit-identical on every tier. |
 | [`Function`](#function) | struct | A body: blocks, instructions, values, stack slots (read access). |
 | [`InstData`](#instdata), [`Terminator`](#terminator) | enums | Instruction and terminator data. |
 | [`Type`](#type), [`Aggregate`](#aggregate), [`Signature`](#signature) | types | Value types, memory layout, signatures. |
@@ -125,8 +131,14 @@ wide as the module's [`PointerWidth`](#pointerwidth). Aggregates are memory-only
 Every operation instance carries a [`Policy`](#policy) with exactly the fields its operation
 needs for its operand class ([`Policy::required_binary`](#policy) and siblings). A field set to
 `error` means the operation can raise an error, so it must be the operation of a `check`
-terminator; `trap` aborts the program; `wrap`, `mask`, `saturate` never fail. `promote` does not
-exist here (every value is statically typed).
+terminator; `trap` aborts the program; `wrap`, `mask`, `saturate` never fail by themselves.
+Two OPS v2 rules raise errors on **signed** types without an `error` field: integer `pow` with a
+negative exponent (`NegativeExponent`, E0006, under every `overflow` but `trap`, which traps with
+that code), and `shl`/`shr` under `shift = saturate` with a negative amount
+(`ShiftOutOfRange`). So on a signed type `pow<overflow=wrap>`, `pow<overflow=error>`, and
+`shl<shift=saturate>` belong in a `check`; on an unsigned type they do not (except an `error`
+field). The rule is [`BinaryOp::can_error`](#operations) (and `UnaryOp::can_error`,
+`ConvOp::can_error`). `promote` does not exist here (every value is statically typed).
 
 ### Error and exception edges
 
@@ -143,15 +155,19 @@ A call or invoke that is not `nogc`, and every `safepoint` instruction, is a saf
 needed after a safepoint goes through its **GC list**; the safepoint defines the relocated
 reference (after the call's returns), and the old value must not be used again. Pointers derived
 from a `ref` (`ref_to_ptr`, then arithmetic) must not be live across any safepoint and must not
-escape. The validator enforces both (IR.md §9).
+escape. The validator enforces both (IR.md §9). A front end may instead use references freely
+and run [`Builder::insert_statepoints`](#builderinsert_statepoints), which fills the lists from
+liveness and rewrites later uses to the relocated values.
 
 ### Rewriting
 
 The same [`Builder`](#builder) rewrites an existing body ([`Module::edit`](#moduleedit)):
 insert at a [`Position`](#position), [`replace_all_uses`](#builderreplace_all_uses) (O(1)
 forwarding), [`remove_inst`](#builderremove_inst), [`replace_inst`](#builderreplace_inst),
-[`split_block`](#buildersplit_block), block-parameter edits, [`compact`](#buildercompact).
-Validate between passes with [`Builder::validate`](#buildervalidate).
+[`split_block`](#buildersplit_block), [`move_inst`](#buildermove_inst), block-parameter edits
+(one at a time, or any number in one linear pass with
+[`remove_block_params`](#builderremove_block_params)), [`compact`](#buildercompact). Validate
+between passes with [`Builder::validate`](#buildervalidate).
 
 ### The textual form
 
@@ -380,7 +396,8 @@ The largest number of values, blocks, instructions, or slots per function (`u32:
 ## Handles
 
 `Value` (`v3`), `Block` (`b3`), `Inst` (`inst3`), `StackSlot` (`ss3`), `FuncId` (`f3`),
-`GlobalId` (`g3`), `SigId` (`s3`), `AggId` (`t3`). Each: `from_u32`, `index`, `as_u32`,
+`GlobalId` (`g3`), `SigId` (`s3`), `AggId` (`t3`), `Variable` (`var3`, scoped to one
+[`Builder`](#ssa-construction)). Each: `from_u32`, `index`, `as_u32`,
 `Display`, `Copy + Ord + Hash`. `Value::next()` gives the next consecutive value.
 
 ### `ValueRange`
@@ -411,10 +428,11 @@ the validator's own code); a refused operation changes nothing.
 | Method | Description | Errors |
 |---|---|---|
 | `create_block(&[Type])` | A new block with parameters. | `CapacityExceeded` |
-| `add_block_param(block, Type)` | Append a parameter (edges must then pass it). | `UnknownBlock` |
-| `remove_block_param(block, i)` | Remove a parameter and the matching argument of every incoming edge. | `UnknownBlock`, `UnknownBlockParam` |
+| `add_block_param(block, Type)` | Append a parameter (edges must then pass it). | `UnknownBlock`, `VariablesActive` (the block has construction parameters) |
+| `remove_block_param(block, i)` | Remove a parameter and the matching argument of every incoming edge (linear in the blocks). | `UnknownBlock`, `UnknownBlockParam` |
+| `remove_block_params(&[Value])` | Remove any number of parameters, from any blocks, and their edge arguments, in one linear pass. | `NotBlockParam` (nothing changed) |
 | `remove_block(block)` | Detach its instructions and parameters; tombstone it. | `EntryBlock`, `UnknownBlock` |
-| `split_block(at: Inst) -> Block` | Move `at`, the rest, and the terminator to a new block; jump to it. | `UnknownInst` |
+| `split_block(at: Inst) -> Block` | Move `at`, the rest, and the terminator to a new block; jump to it. | `UnknownInst`, `VariablesActive` (unsealed blocks) |
 
 ### Instructions
 
@@ -451,6 +469,145 @@ overwritten — M42).
 | `jump`, `branch`, `switch`, `ret`, `unreachable`, `trap` | Control flow. |
 | `tail_call(Call)`, `invoke(Call, normal, unwind)`, `check(InstData, normal, error)`, `resume(payload)` | Calls, exceptions, errors. |
 
+### `Builder::move_inst`
+
+`move_inst(inst, Position)`: unlinks an instruction and links it at the position, in O(1); its
+handle and results are kept, dominance is the validator's to check. A position naming the moved
+instruction moves with it; moving next to itself does nothing. Errors: `UnknownInst`,
+`UnknownBlock`.
+
+```rust
+use ir_lang::{Linkage, Module, Position, Signature, Type};
+
+let mut m = Module::new("m");
+let f = m.declare_function("f", &Signature::new(&[], &[]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.iconst(Type::I32, 1)?;
+let y = b.iconst(Type::I32, 2)?;
+let (xi, yi) = (b.func().defining_inst(x).unwrap(), b.func().defining_inst(y).unwrap());
+b.move_inst(yi, Position::Before(xi))?;
+assert_eq!(b.func().insts(b.func().entry()).collect::<Vec<_>>(), [yi, xi]);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### `Builder::remove_block_params`
+
+`remove_block_params(&[Value])` removes the given parameters (any blocks, duplicates ignored)
+and the matching argument of every edge into their blocks in one pass over the function, so a
+pass dropping thousands of dead parameters stays linear. The values become detached. Errors:
+`NotBlockParam` if any value is not a live block's parameter (checked first; nothing changes).
+
+### SSA construction
+
+Braun et al., "Simple and Efficient Construction of SSA Form" (CC 2013), with block parameters
+for phis, built into the `Builder`. A front end lowers a mutable local as a `Variable`:
+
+| Method | Description | Errors |
+|---|---|---|
+| `declare_var(Type) -> Variable` | A new variable. | `CapacityExceeded` |
+| `def_var(Variable, Value)` | Assign in the current block (types must match). | `UnknownVariable`, `UnknownValue`, `Invalid(TypeMismatch)`, `AlreadyTerminated` |
+| `use_var(Variable) -> Value` | The current value in the current block; adds block parameters where paths meet. | `UnknownVariable`, `CapacityExceeded` |
+| `seal_block(Block)` | Every edge into the block exists: complete its incomplete parameters; later edges into it are refused. Idempotent; the entry is always sealed. | `UnknownBlock` |
+| `is_sealed(Block) -> bool` | Whether sealed. | — |
+| `seal_all_blocks()` | Seal everything, then remove the construction's trivial parameters to a fixpoint and rewrite operands. | `CapacityExceeded` |
+
+Rules of use:
+
+- Lower in order: `def_var` and `use_var` act at the end of the current block.
+- Seal a block once all its predecessors are wired (a loop header after its back edge); sealing
+  early gives fewer parameters, sealing late is always correct.
+- An edge passes arguments for its target's **own** parameters only; the builder appends the
+  variables' values for the parameters it added (a terminator into a sealed block is refused
+  with `SealedBlock`).
+- A parameter cannot be added to a block after the construction added one (`VariablesActive`);
+  create blocks with their own parameters first.
+- A variable read where it was never assigned reads zero of its type (`0`, `false`, `+0.0`,
+  `null`), defined at the start of the entry block.
+- A returned value may later be forwarded (a parameter that turned out trivial); operands are
+  rewritten by `seal_all_blocks`, and handles kept in a front end's own tables resolve with
+  `Function::resolve`.
+- `split_block` ends the construction once every block is sealed (refused before); `compact`
+  ends it unconditionally. `Variable`s are unknown afterwards.
+
+Every walk is iterative (a 60,000-block chain and 400 nested loops are in the tests). Definitions
+are kept in an open-addressing table keyed by (variable, block).
+
+```rust
+use ir_lang::{Linkage, Module, Signature, Type};
+
+// let mut x = a; if c { x = 1 } return x
+let mut m = Module::new("m");
+let f = m.declare_function("f", &Signature::new(&[Type::I32, Type::Bool], &[Type::I32]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let x = b.declare_var(Type::I32)?;
+let (a, c) = (b.param(0)?, b.param(1)?);
+b.def_var(x, a)?;
+let (then, join) = (b.create_block(&[])?, b.create_block(&[])?);
+b.branch(c, then, &[], join, &[])?;
+b.switch_to(then)?;
+b.seal_block(then)?;
+let one = b.iconst(Type::I32, 1)?;
+b.def_var(x, one)?;
+b.jump(join, &[])?;
+b.switch_to(join)?;
+b.seal_block(join)?;
+let v = b.use_var(x)?; // a parameter of `join`: `a` from the entry, `1` from `then`
+b.ret(&[v])?;
+b.seal_all_blocks()?;
+assert_eq!(b.func().block_params(join), &[v]);
+m.validate()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### `Builder::insert_statepoints`
+
+`insert_statepoints() -> Result<StatepointStats, BuildError>`: makes every safepoint's GC list
+hold exactly the references that need it (IR.md §9 rule 1) and rewrites every later use to the
+relocated reference. In order: reference liveness exactly as the validator defines it; each
+safepoint's list gains the references live across it (entries already present are kept and
+reused; a `call`/`safepoint` whose list grows is replaced, its old results forwarding to the
+new ones; an `invoke` passes relocated references as `resN` on both edges); then SSA repair over
+the finished graph, adding block parameters where relocated versions meet, and removing the
+trivial ones. Variable construction in progress is finished first.
+
+The validator is the oracle: the result is validated, and on any error the function is restored
+exactly. A *derived* pointer live across a safepoint cannot be relocated (it must be recomputed
+from the relocated reference), so it is refused with `Invalid(LiveAcrossSafepoint)`; input that
+is invalid for any reason other than the safepoint rules is refused with its first validation
+error. Cost: linear in the function plus the references' live ranges.
+
+**Budget.** The output can be quadratic in the input (every reference live across every
+safepoint), so the work is capped: `insert_statepoints()` uses `DEFAULT_STATEPOINT_BUDGET`
+(2^26) and `insert_statepoints_within(budget)` takes an explicit one, counting (reference,
+safepoint) relocations plus block parameters created. Over budget it returns `BudgetExceeded`
+with the function unchanged. Variable construction finished at the start is kept either way.
+
+`StatepointStats { safepoints, relocations, params }` (`#[non_exhaustive]`, `Default`): the
+safepoints whose lists grew, the entries added, and the block parameters added (after trivial
+ones are removed). A second run on its own output returns all zeros.
+
+```rust
+use ir_lang::{BlockArg, BlockCall, Call, Linkage, Module, Signature, Type};
+
+let mut m = Module::new("m");
+let thrower = m.declare_function("thrower", &Signature::new(&[], &[]), Linkage::Import)?;
+let f = m.declare_function("f", &Signature::new(&[Type::Ref], &[Type::Ref]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let r = b.param(0)?;
+let (ok, pad) = (b.create_block(&[])?, b.create_block(&[Type::Ptr])?);
+b.invoke(Call::direct(thrower, &[]), BlockCall::new(ok, &[]), BlockCall::with_args(pad, &[BlockArg::Exception]))?;
+b.switch_to(ok)?;
+b.ret(&[r])?; // used after the call on the normal edge, without relocation
+b.switch_to(pad)?;
+let exn = b.block_param(pad, 0)?;
+b.resume(exn)?;
+let stats = b.insert_statepoints()?;
+assert_eq!((stats.relocations, stats.params), (1, 1));
+assert!(m.to_string().contains("invoke @thrower() gc(v0) to b1(res0) unwind b2(exn)"));
+m.validate()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### `Builder::replace_all_uses`
 
 `replace_all_uses(old, new)`: every use of `old` reads `new`, in O(1) (forwarding). Types must
@@ -469,7 +626,9 @@ result types. Errors: `UnknownInst`, `Invalid`.
 
 ### `Builder::split_block`
 
-See the table above; no handle changes, and every use stays dominated.
+See the table above; no handle changes, and every use stays dominated. With variable
+construction in use it is refused while blocks are unsealed, and ends the construction
+otherwise.
 
 ### `Builder::resolve_aliases`
 
@@ -479,7 +638,8 @@ Rewrites every operand to its final forwarding target.
 
 Renumbers densely (entry, then live blocks by handle; instructions and values in layout order),
 drops tombstones and forwarding, and returns the [`Remap`](#remap). A compacted module prints,
-parses back, and compares equal as text.
+parses back, and compares equal as text. Variable construction state is dropped (call
+`seal_all_blocks` first).
 
 ```rust
 use ir_lang::{Linkage, Module, Signature, Type};
@@ -605,10 +765,28 @@ A bit set: `NOUNWIND`, `NORETURN`, `NOGC` (checked), `READONLY`, `READNONE`, `CO
 ## Operations
 
 `UnaryOp` (`neg abs not sqrt floor ceil trunc round round_even`), `BinaryOp` (`add sub mul div
-rem floor_div floor_mod ieee_rem and or xor shl shr min max total_cmp`), `CmpOp` (`eq ne lt le
-gt ge`), `ConvOp` (`int_cast zext sext narrow int_to_float float_to_int float_cast bitcast
+rem floor_div floor_mod ieee_rem and or xor shl shr min max total_cmp pow`), `CmpOp` (`eq ne lt
+le gt ge`), `ConvOp` (`int_cast zext sext narrow int_to_float float_to_int float_cast bitcast
 char_from_u32 bool_to_int ptr_to_int int_to_ptr ref_to_ptr`). Each has `ALL`, `name`,
-`from_name`, `Display`; all are `#[non_exhaustive]`. Semantics: OPS §3–§5.
+`from_name`, `Display`; all are `#[non_exhaustive]`. Semantics: OPS §3–§5 (v2).
+
+`pow` (OPS v2) takes two operands of one integer or float type. Integer: the exact power,
+`0 ** 0 = 1`, an unrepresentable result per `overflow` (`wrap` keeps the low bits); a negative
+exponent is `NegativeExponent` (E0006), a trap with that code under `overflow = trap`. Float:
+[`ls_pow`](#ls_pow), no policy; `f32` widens, computes, and rounds once.
+
+Fallibility (what must be in a `check`): `UnaryOp::can_error(Policy)`,
+`BinaryOp::can_error(Policy, Type)`, `ConvOp::can_error(Policy)`.
+
+```rust
+use ir_lang::{BinaryOp, ConvOp, Overflow, Policy, Shift, Type, UnaryOp};
+
+assert!(BinaryOp::Pow.can_error(Policy::overflow(Overflow::Wrap), Type::I64));
+assert!(!BinaryOp::Pow.can_error(Policy::overflow(Overflow::Wrap), Type::U64));
+assert!(BinaryOp::Shr.can_error(Policy::shift(Shift::Saturate), Type::I32));
+assert!(ConvOp::CharFromU32.can_error(Policy::NONE));
+assert!(!UnaryOp::Neg.can_error(Policy::overflow(Overflow::Trap)));
+```
 
 ## Policy
 
@@ -622,18 +800,40 @@ assert_eq!(p.to_string(), "<overflow=wrap,div_zero=trap>");
 ```
 
 `Policy { overflow, div_zero, shift, float_to_int }` (each optional). Constructors `NONE`,
-`overflow`, `div_zero`, `shift`, `float_to_int`, `with_div_zero`; `can_error`;
+`overflow`, `div_zero`, `shift`, `float_to_int`, `with_div_zero`; `can_error` (whether any field
+is `error`; see [Operations](#operations) for the full fallibility rule);
 `required_unary(UnaryOp, Type)`, `required_binary(BinaryOp, Type)`,
 `required_conversion(ConvOp)` give the [`PolicyFields`](#policy) an instance must carry
 (`matches`, `is_empty`). Field values: `Overflow { Error, Wrap, Trap }`,
-`DivZero { Error, Trap }`, `Shift { Error, Mask }`, `FloatToInt { Error, Saturate }`, each with
-`name`/`from_name`.
+`DivZero { Error, Trap }`, `Shift { Error, Mask, Saturate }`, `FloatToInt { Error, Saturate }`,
+each with `name`/`from_name`. `Shift::Saturate` (OPS v2): an amount at least the width gives `0`
+(`shl`, and `shr` of a non-negative value) or `-1` (`shr` of a negative signed value); a
+negative amount is still `ShiftOutOfRange`.
 
 ### `OpError`
 
 `ArithOverflow` (1), `DivByZero` (2), `ShiftOutOfRange` (3), `InvalidConversion` (4),
-`InvalidChar` (5): the OPS §6 codes. `code`, `from_code`; `Display` prints `E0001
-ArithOverflow`.
+`InvalidChar` (5), `NegativeExponent` (6, OPS v2): the OPS §6 codes. `code`, `from_code`;
+`Display` prints `E0001 ArithOverflow`.
+
+## `ls_pow`
+
+`ls_pow(x: f64, y: f64) -> f64`: the float `pow` of OPS v2, specified operation by operation in
+`_lexersketch/specs/ops-vectors/pow.md` so every tier produces the same bits (OPS forbids a
+platform libm). C99 Annex F special cases first; a NaN result is the canonical
+`0x7FF8_0000_0000_0000`; otherwise correctly rounded except within about 2^-85 of a rounding
+boundary, where it is still deterministic. Needs only `core`, so `no_std` optimizers can fold
+`pow` with it. Checked against all 122 vectors of the spec.
+
+```rust
+use ir_lang::ls_pow;
+
+assert_eq!(ls_pow(2.0, -1.0), 0.5);
+assert_eq!(ls_pow(-0.0, -3.0), f64::NEG_INFINITY);
+assert_eq!(ls_pow(1.0, f64::NAN), 1.0);
+// f32: widen both operands, compute, round once.
+assert_eq!(ls_pow(f64::from(3.0f32), f64::from(2.0f32)) as f32, 9.0f32);
+```
 
 ## Errors
 
@@ -648,7 +848,10 @@ Why a declaration was refused: `DuplicateName`, `EmptyName`, `UnknownFunction`,
 
 Why a builder operation was refused (nothing changed): `AlreadyTerminated`, `UnknownBlock`,
 `UnknownInst`, `UnknownValue`, `UnknownParam`, `EntryBlock`, `UnknownBlockParam`,
-`Invalid(ValidationErrorKind)`, `CapacityExceeded`.
+`Invalid(ValidationErrorKind)`, `CapacityExceeded`; new in 2.0.0-alpha.2: `UnknownVariable`,
+`SealedBlock` (an edge into a sealed block), `NotBlockParam`, `VariablesActive` (see
+[SSA construction](#ssa-construction)), `BudgetExceeded` (see
+[`insert_statepoints`](#builderinsert_statepoints)).
 
 ```rust
 use ir_lang::{BuildError, Linkage, Module, Overflow, Signature, Type};
@@ -742,7 +945,7 @@ assert_eq!(interp::run(&m, f, &[Val::u8(200)])?, Outcome::Trap(1));
 | `Val` | A typed bit pattern: `new`, `i8`…`u64`, `f32`, `f64`, `bool`, `ptr`; `ty`, `bits`, `as_i128`, `as_f64`, `as_bool`, `same_as` (NaN-equivalent). |
 | `Memory` | `read`, `write`, `alloc` (host heap), `alloc_object` (a GC object; returns a `ref`), `ref_address`. |
 | `Host`, `HostReturn`, `NoHost` | Implement imported functions. |
-| `eval_unary`, `eval_binary`, `eval_compare`, `eval_convert`, `eval_fma`, `OpFault` | Per-operation OPS semantics on bits, for constant folding. |
+| `eval_unary`, `eval_binary`, `eval_compare`, `eval_convert`, `eval_fma`, `OpFault` | Per-operation OPS semantics on bits, for constant folding (OPS v2: `pow` via `ls_pow`, `shift = saturate`, `NegativeExponent`). |
 
 Every safepoint starts a new GC epoch; using a reference from an earlier epoch is `StaleRef`, so
 a missing relocation is caught at run time.
@@ -763,9 +966,10 @@ a missing relocation is caught at run time.
 | Global / stack slot alignment | 2^16 |
 | Access alignment (`MemFlags`) | 2^29 |
 | Parser input | 256 MiB by default (`ParseLimits`) |
+| Statepoint insertion work | `DEFAULT_STATEPOINT_BUDGET` = 2^26 relocations + parameters (`insert_statepoints_within` to change) |
 
 ## Stability
 
-`2.0.0-alpha.1` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
-[`CHANGELOG.md`](../CHANGELOG.md). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
+`2.0.0-alpha.2` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
+[`CHANGELOG.md`](../CHANGELOG.md) (2.0.0-alpha.2 lists those since alpha.1). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
 new types, operations, terminators, and error kinds are additive. MSRV is 1.85.

@@ -21,10 +21,115 @@
 
 ---
 
+## [2.0.0-alpha.2] - 2026-10-11
+
+OPS v2 in the IR, SSA construction for mutable locals, and automatic statepoint
+insertion: the gaps the alpha.1 consumers (opt-lang 0.2.0, backend-lang 0.3.0)
+and the HIR lowering (irgen-lang, ISSUES P29) reported. Normative spec:
+`_lexersketch/specs/IR.md` (updated); operation semantics `specs/OPS.md` v2.
+
+### Breaking (vs 2.0.0-alpha.1)
+
+- **Which operations need a `check` now depends on the operand type, not only
+  the policy.** On a **signed** integer type, `pow` under `overflow = wrap` or
+  `error` (a negative exponent raises `NegativeExponent`) and `shl`/`shr` under
+  `shift = saturate` (a negative amount raises `ShiftOutOfRange`) can raise an
+  error without an `error` field, so they are valid only as the operation of a
+  `check` terminator, and as plain instructions they are refused
+  (`ErrorOutsideCheck`). On unsigned types they are plain instructions. Code that
+  decides "plain instruction or `check`" with `Policy::can_error()` must use
+  `BinaryOp::can_error(policy, ty)` (and `UnaryOp::can_error`,
+  `ConvOp::can_error`). `Policy::can_error` itself is unchanged (any field is
+  `error`); only its documentation now says it is not the whole rule.
+- **OPS error code 6 is taken.** `OpError::from_code(6)` is now
+  `Some(NegativeExponent)` (was `None`), and the `check` error edge or trap of an
+  integer `pow` can carry code 6. A language that used `trap 6` for its own
+  purpose now collides with an OPS code (IR.md §7: codes 1–6 are OPS).
+- New enum variants (all enums are `#[non_exhaustive]`, so a `match` with a
+  wildcard arm compiles unchanged, but behaviour behind the wildcard is now
+  reachable): `BinaryOp::Pow`, `Shift::Saturate`, `OpError::NegativeExponent`,
+  `BuildError::{UnknownVariable, SealedBlock, NotBlockParam, VariablesActive,
+  BudgetExceeded}`.
+  `BinaryOp::ALL` and `OpError` codes grew accordingly.
+- `Builder::compact` drops the builder's variable-construction state (variables
+  declared before are unknown afterwards). `Builder::split_block` returns
+  `VariablesActive` while variable construction has unsealed blocks. Builders
+  that never declare a variable or seal a block are unaffected.
+
+### Added
+
+- **OPS v2.** `BinaryOp::Pow` on integers (exact repeated-squaring power, `0 ** 0
+  = 1`, overflow per policy, `wrap` keeps the low bits; negative exponent →
+  `NegativeExponent` E0006, a trap with that code under `trap`) and on floats
+  (no policy; the shared routine). `Shift::Saturate` (amount ≥ width: `0`, or
+  `-1` for `shr` of a negative signed value; a negative amount is still
+  `ShiftOutOfRange`). `OpError::NegativeExponent` (code 6). The interpreter,
+  validator, printer, and parser support all of it; `promote` stays
+  unrepresentable.
+- `ls_pow(x, y)`: the family's shared float `pow`
+  (`_lexersketch/specs/ops-vectors/pow.md`), bit-identical to every other tier,
+  in `core` (no `std` needed, so `no_std` optimizers can fold `pow`). The
+  interpreter's float `pow` is this routine; `f32` widens, computes, rounds once.
+- `BinaryOp::can_error(Policy, Type)`, `UnaryOp::can_error(Policy)`,
+  `ConvOp::can_error(Policy)`: the exact fallibility rule the validator applies.
+- **SSA construction** (Braun et al. 2013, block parameters for phis):
+  `Variable`, `Builder::{declare_var, def_var, use_var, seal_block,
+  seal_all_blocks, is_sealed}`. Edges into a block pass only the block's own
+  arguments; the builder appends the variables'. Trivial parameters are
+  forwarded when their block is sealed and removed, to a fixpoint, by
+  `seal_all_blocks`. Unassigned reads give zero of the type. Iterative
+  throughout, definitions in an open-addressing `(variable, block)` table.
+- **Statepoint insertion**: `Builder::insert_statepoints() ->
+  StatepointStats`. Computes reference liveness as the validator defines it,
+  adds the missing GC-list entries at every safepoint (existing entries reused;
+  `invoke`s pass relocated references as `resN` on both edges), repairs SSA over
+  the finished graph with new block parameters where relocated versions meet,
+  removes the trivial ones, and validates the result; on any error the function
+  is restored exactly. `StatepointStats { safepoints, relocations, params }`.
+  Budgeted: `insert_statepoints_within(budget)` caps relocations plus block
+  parameters (`BudgetExceeded`, nothing changed); `insert_statepoints()` uses
+  `DEFAULT_STATEPOINT_BUDGET` (2^26), since the output can be quadratic in the
+  input.
+- `Builder::remove_block_params(&[Value])`: removes any number of block
+  parameters, from any blocks, with their edge arguments, in one linear pass
+  (opt-lang 0.2 had to rebuild blocks to avoid the per-parameter scan of
+  `remove_block_param`).
+- `Builder::move_inst(Inst, Position)`: moves an instruction in O(1), keeping
+  its handle and results (opt-lang 0.2 had to re-insert and forward).
+- Variable construction also works when adding code to an existing body
+  (`Module::edit`): the builder reads the existing edges when it starts. It is a
+  lowering tool, not an SSA updater for existing definitions (`def_var` is
+  refused on a block that already has its terminator).
+- Example `variables` (SSA construction and statepoint insertion); tests
+  `ops_v2`, `pow_vectors` (all 122 spec vectors), `ssa`, `statepoint`; benches
+  for SSA construction, statepoint insertion, and `ls_pow`.
+
+### Changed
+
+- The validator's structural checks and safepoint checks are separate internal
+  steps (the statepoint pass validates structure first, then the whole result).
+  No change in what is accepted or in the order errors are reported.
+- `remove_block_param` documents its linear-in-blocks cost and points to
+  `remove_block_params`.
+
+### Migrating from 2.0.0-alpha.1
+
+| alpha.1 | alpha.2 |
+|---|---|
+| `if policy.can_error() { check } else { plain }` for a binary op | `if op.can_error(policy, operand_ty) { check } else { plain }` |
+| `if policy.can_error() \|\| op == ConvOp::CharFromU32` | `op.can_error(policy)` |
+| A `match` on `BinaryOp`/`Shift`/`OpError` with a wildcard that returns "unsupported" | Still compiles; handle `Pow`, `Saturate`, `NegativeExponent` (code 6) to support OPS v2 |
+| Rebuilding blocks to drop many parameters | `b.remove_block_params(&params)?` |
+| Re-insert + `replace_all_uses` to move an instruction | `b.move_inst(inst, pos)?` |
+| Hand-written GC lists at every call | Optional: use references freely, then `b.insert_statepoints()?` |
+| Stack slots for mutable locals, or hand-placed block parameters | Optional: `declare_var` / `def_var` / `use_var` / `seal_block` / `seal_all_blocks` |
+
+---
+
 ## [2.0.0-alpha.1] - 2026-10-09
 
 The 2.0 redesign, as a pre-release: the SSA IR of the native compiler path
-(LexerSketch ARCHITECTURE �9), designed once for every later phase. The normative
+(LexerSketch ARCHITECTURE §9), designed once for every later phase. The normative
 specification is `_lexersketch/specs/IR.md`. Consumers (codegen-lang, jit-lang,
 aot-lang, linker-lang) stay on 1.x until the coordinated Wave M.
 
@@ -202,7 +307,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.1...HEAD
+[Unreleased]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.2...HEAD
+[2.0.0-alpha.2]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.1...v2.0.0-alpha.2
 [2.0.0-alpha.1]: https://github.com/jamesgober/ir-lang/compare/v1.0.0...v2.0.0-alpha.1
 [1.0.0]: https://github.com/jamesgober/ir-lang/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jamesgober/ir-lang/compare/v0.1.0...v0.2.0

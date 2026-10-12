@@ -1454,6 +1454,13 @@ impl Terminator {
     /// assert_eq!(t, Terminator::Resume { payload: Value::from_u32(9) });
     /// ```
     pub fn map_operands(&mut self, mut f: impl FnMut(Value) -> Value) {
+        self.map_own_operands(&mut f);
+        self.for_each_successor_mut(|c| c.map_values(&mut f));
+    }
+
+    /// Rewrites the values the terminator itself consumes, excluding edge
+    /// arguments.
+    pub(crate) fn map_own_operands(&mut self, mut f: impl FnMut(Value) -> Value) {
         match self {
             Terminator::Jump(_) | Terminator::Unreachable | Terminator::Trap { .. } => {}
             Terminator::Branch { cond, .. } => *cond = f(*cond),
@@ -1469,7 +1476,6 @@ impl Terminator {
             Terminator::Check { op, .. } => op.map_operands(&mut f),
             Terminator::Resume { payload } => *payload = f(*payload),
         }
-        self.for_each_successor_mut(|c| c.map_values(&mut f));
     }
 
     /// The textual opcode (`jump`, `br`, `invoke`, ...).

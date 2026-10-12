@@ -185,7 +185,7 @@ fn unary_types(
         });
     }
     check_policy(op.name(), Policy::required_unary(op, ty), policy)?;
-    check_error_placement(op.name(), policy.can_error(), in_check)?;
+    check_error_placement(op.name(), op.can_error(policy), in_check)?;
     Ok(ty)
 }
 
@@ -204,7 +204,8 @@ fn binary_types(
         | BinaryOp::Div
         | BinaryOp::Rem
         | BinaryOp::Min
-        | BinaryOp::Max => ty.is_numeric(),
+        | BinaryOp::Max
+        | BinaryOp::Pow => ty.is_numeric(),
         BinaryOp::FloorDiv | BinaryOp::FloorMod | BinaryOp::Shl | BinaryOp::Shr => ty.is_int(),
         BinaryOp::IeeeRem | BinaryOp::TotalCmp => ty.is_float(),
         BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => ty.is_int() || ty == Type::Bool,
@@ -216,7 +217,7 @@ fn binary_types(
         });
     }
     check_policy(op.name(), Policy::required_binary(op, ty), policy)?;
-    check_error_placement(op.name(), policy.can_error(), in_check)?;
+    check_error_placement(op.name(), op.can_error(policy, ty), in_check)?;
     Ok(if op == BinaryOp::TotalCmp {
         Type::I8
     } else {
@@ -263,8 +264,7 @@ fn convert_types(
         });
     }
     check_policy(op.name(), Policy::required_conversion(op), policy)?;
-    let can_error = policy.can_error() || op == ConvOp::CharFromU32;
-    check_error_placement(op.name(), can_error, in_check)?;
+    check_error_placement(op.name(), op.can_error(policy), in_check)?;
     Ok(to)
 }
 

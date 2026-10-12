@@ -9,6 +9,7 @@ use crate::function::{Function, MAX_ENTITIES, SlotData, ValueDef};
 use crate::inst::{BlockCall, Call, InstData, MemFlags, MemOrder, RmwOp, SwitchCase, Terminator};
 use crate::module::Decls;
 use crate::ops::{BinaryOp, CmpOp, ConvOp, Overflow, Policy, UnaryOp};
+use crate::ssa::SsaState;
 use crate::types::{CallConv, MemType, Signature, Type};
 use crate::typing;
 
@@ -209,11 +210,14 @@ impl Remap {
 /// ```
 #[derive(Debug)]
 pub struct Builder<'m> {
-    decls: &'m Decls,
-    func: &'m mut Function,
-    id: FuncId,
-    pos: Position,
-    scratch: Vec<Type>,
+    pub(crate) decls: &'m Decls,
+    pub(crate) func: &'m mut Function,
+    pub(crate) id: FuncId,
+    pub(crate) pos: Position,
+    pub(crate) scratch: Vec<Type>,
+    /// SSA construction state, created by the first variable declaration or
+    /// block seal.
+    pub(crate) ssa: Option<Box<SsaState>>,
 }
 
 impl<'m> Builder<'m> {
@@ -225,6 +229,7 @@ impl<'m> Builder<'m> {
             id,
             pos: Position::End(entry),
             scratch: Vec::new(),
+            ssa: None,
         }
     }
 
@@ -493,7 +498,9 @@ impl<'m> Builder<'m> {
     ///
     /// # Errors
     ///
-    /// [`BuildError::UnknownBlock`], [`BuildError::CapacityExceeded`].
+    /// [`BuildError::UnknownBlock`], [`BuildError::CapacityExceeded`];
+    /// [`BuildError::VariablesActive`] if variable reads already added parameters
+    /// to the block (see [`declare_var`](Builder::declare_var)).
     ///
     /// # Examples
     ///
@@ -512,6 +519,14 @@ impl<'m> Builder<'m> {
         if !self.func.is_live_block(block) {
             return Err(BuildError::UnknownBlock { block });
         }
+        if self
+            .ssa
+            .as_deref()
+            .is_some_and(|st| st.first_ssa.get(block.index()).is_some_and(|&f| f != NONE))
+        {
+            // Parameters the variable construction added must stay last.
+            return Err(BuildError::VariablesActive);
+        }
         let index = self.func.block_params(block).len() as u32;
         let v = self
             .func
@@ -525,7 +540,9 @@ impl<'m> Builder<'m> {
 
     /// Removes the `index`-th parameter of `block` and the matching argument from
     /// every edge into it. The parameter value becomes detached; replace its uses
-    /// first. Costs time linear in the number of blocks.
+    /// first. Costs time linear in the number of blocks; to remove many
+    /// parameters, use [`remove_block_params`](Builder::remove_block_params),
+    /// which removes any number in one pass.
     ///
     /// # Errors
     ///
@@ -579,6 +596,9 @@ impl<'m> Builder<'m> {
                 });
             }
         }
+        if let Some(st) = self.ssa.as_deref_mut() {
+            st.refresh_first(self.func, block);
+        }
         Ok(())
     }
 
@@ -602,6 +622,12 @@ impl<'m> Builder<'m> {
         for inst in insts {
             self.detach_inst(inst);
         }
+        if let (Some(st), Some(term)) = (
+            self.ssa.as_deref_mut(),
+            self.func.blocks[block.index()].term.as_ref(),
+        ) {
+            st.remove_edges(block, term);
+        }
         let node = &mut self.func.blocks[block.index()];
         node.live = false;
         node.term = None;
@@ -624,7 +650,10 @@ impl<'m> Builder<'m> {
     ///
     /// # Errors
     ///
-    /// [`BuildError::UnknownInst`].
+    /// [`BuildError::UnknownInst`]; [`BuildError::VariablesActive`] while
+    /// variable construction ([`declare_var`](Builder::declare_var)) has unsealed
+    /// blocks. Once every block is sealed, splitting ends the construction: the
+    /// builder's variables are unknown afterwards.
     ///
     /// # Examples
     ///
@@ -647,6 +676,15 @@ impl<'m> Builder<'m> {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn split_block(&mut self, at: Inst) -> Result<Block, BuildError> {
+        if let Some(st) = self.ssa.as_deref() {
+            // The variables' definitions are recorded per block, so which of
+            // them belong before `at` is not known: splitting ends the
+            // construction, which must be complete.
+            if !st.is_complete(self.func) {
+                return Err(BuildError::VariablesActive);
+            }
+            self.ssa = None;
+        }
         let block = self
             .func
             .inst_block(at)
@@ -1697,11 +1735,17 @@ impl<'m> Builder<'m> {
 
     /// Ends the current block with `term`, after checking it.
     ///
+    /// With variable construction in use ([`declare_var`](Builder::declare_var)),
+    /// an edge passes arguments for its target's own parameters only; the builder
+    /// appends the variables' values for the parameters it added. (Variable reads
+    /// made to complete an edge stay even if the terminator is then refused.)
+    ///
     /// # Errors
     ///
     /// [`BuildError::AlreadyTerminated`] if the block has a terminator (it is never
     /// overwritten); [`BuildError::Invalid`] if the terminator is ill-formed;
-    /// a stale position.
+    /// [`BuildError::SealedBlock`] for an edge into a sealed block; a stale
+    /// position.
     ///
     /// # Examples
     ///
@@ -1715,13 +1759,26 @@ impl<'m> Builder<'m> {
     /// assert!(b.set_terminator(Terminator::Unreachable).is_err());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn set_terminator(&mut self, term: Terminator) -> Result<(), BuildError> {
+    pub fn set_terminator(&mut self, mut term: Terminator) -> Result<(), BuildError> {
         let block = self.current()?;
         if self.func.terminator(block).is_some() {
             return Err(BuildError::AlreadyTerminated { block });
         }
+        if let Some(st) = self.ssa.as_deref_mut() {
+            let entry = self.func.entry();
+            if let Some(dest) = term
+                .successors()
+                .find(|d| d.block != entry && st.is_sealed(d.block))
+            {
+                return Err(BuildError::SealedBlock { block: dest.block });
+            }
+            st.complete_new(self.func, block, &mut term)?;
+        }
         let sig = self.decls.func_sig(self.id).unwrap_or(&EMPTY_SIG);
         typing::check_terminator(self.decls, self.func, sig, &term, &mut self.scratch)?;
+        if let Some(st) = self.ssa.as_deref_mut() {
+            st.add_edges(block, &term);
+        }
         self.func.blocks[block.index()].term = Some(term);
         Ok(())
     }
@@ -1750,7 +1807,11 @@ impl<'m> Builder<'m> {
         if !self.func.is_live_block(block) {
             return Err(BuildError::UnknownBlock { block });
         }
-        Ok(self.func.blocks[block.index()].term.take())
+        let term = self.func.blocks[block.index()].term.take();
+        if let (Some(st), Some(t)) = (self.ssa.as_deref_mut(), term.as_ref()) {
+            st.remove_edges(block, t);
+        }
+        Ok(term)
     }
 
     /// Ends the block with a jump.
@@ -2239,12 +2300,16 @@ impl<'m> Builder<'m> {
     /// live blocks by handle), instructions in layout order, values in definition
     /// order; drops removed instructions and blocks, detached values, and
     /// forwarding (operands are resolved first). Returns the mapping. The insertion
-    /// point moves to the end of the entry block.
+    /// point moves to the end of the entry block. Variable construction state is
+    /// dropped (call [`seal_all_blocks`](Builder::seal_all_blocks) first): the
+    /// builder's [`Variable`](crate::Variable)s are unknown afterwards.
     ///
     /// A compacted function prints, parses back, and compares equal.
     ///
     /// See [`Remap`] for an example.
     pub fn compact(&mut self) -> Remap {
+        // Renumbering invalidates the variable construction's tables.
+        self.ssa = None;
         self.resolve_aliases();
         let remap = crate::compact::compact(self.func);
         self.pos = Position::End(self.func.entry());

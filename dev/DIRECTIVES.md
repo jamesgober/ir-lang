@@ -71,8 +71,19 @@ Each is property-tested (file in brackets).
 - **Exact policies**: every operation instance carries exactly the policy fields OPS requires;
   `error` policies only inside `check`; `promote` is unrepresentable. [`tests/validate.rs`,
   `tests/parse.rs`]
-- **OPS semantics**: the interpreter computes exactly OPS on every type, policy, and edge value.
-  [`tests/interp.rs` reference comparisons, `tests/differential.rs`]
+- **OPS semantics**: the interpreter computes exactly OPS (v2) on every type, policy, and edge
+  value; float `pow` is `ls_pow` bit for bit. [`tests/interp.rs` reference comparisons,
+  `tests/ops_v2.rs`, `tests/pow_vectors.rs` (all spec vectors), `tests/differential.rs`]
+- **SSA construction preserves meaning and is trivially minimal**: a program lowered through
+  `def_var`/`use_var` (blocks sealed eagerly or lazily) computes what the independent evaluator
+  computes, validates, is deterministic, and keeps no trivial block parameter.
+  [`tests/ssa.rs` `prop_ssa_eager_matches_evaluator`, `prop_ssa_lazy_matches_evaluator`,
+  `prop_ssa_output_validates_and_is_deterministic`]
+- **Statepoint insertion establishes the safepoint rule without changing meaning**: on random
+  GC-reference programs the result validates, a second run changes nothing, and the
+  interpreter's moving-collector simulation agrees with an independent evaluator; on refused
+  input the function is unchanged. [`tests/statepoint.rs`
+  `prop_statepoints_make_gc_programs_valid_and_correct`, refusal tests]
 - **Safepoint rule**: no GC reference or pointer derived from one is live across a safepoint, and
   derived pointers never escape. [`tests/brute.rs` `prop_safepoint_liveness_matches_brute_force`
   (against path search on random CFGs with block-parameter references), `tests/validate.rs`,

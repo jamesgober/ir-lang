@@ -78,6 +78,9 @@ b0(v0: i64, v1: f64):
     v50: ptr = global_addr @"odd name"
     v51: ptr = global_addr @table
     v52: ptr = global_addr @ext
+    v53: u64 = pow<overflow=wrap> v19, v34
+    v54: f64 = pow v1, v4
+    v55: u64 = shr<shift=saturate> v19, v34
     switch v37 default b1 [0: b1, 7: b2(v37)]
 b1:
     br v16, b3, b4

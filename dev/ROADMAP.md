@@ -104,7 +104,66 @@ Moved to 2.0.0 (not dropped), with the reason:
 - **Automatic statepoint insertion** (compute reference liveness, fill GC lists, repair SSA with
   new block parameters). The validator already checks the rule; the utility needs an SSA updater,
   which opt-lang also needs (loop rotation, jump threading). Designing both together, against
-  opt-lang's first passes, avoids building the updater twice.
+  opt-lang's first passes, avoids building the updater twice. **Delivered in 2.0.0-alpha.2**
+  (below).
+
+## v2.0.0-alpha.2 - OPS v2, SSA construction, statepoint insertion (DONE, 2026-10-11)
+Brings the IR up to OPS v2 and closes the gaps alpha.1's consumers reported: ISSUES P32
+(no `pow`, no `shift = saturate`), the self-review's "no SSA updater for lowering mutable
+locals" (needed by irgen-lang, ISSUES P29), "no automatic statepoint insertion", and
+opt-lang 0.2.0's workarounds for the missing instruction move and the per-parameter scan of
+`remove_block_param`.
+
+Delivered:
+- OPS v2: `BinaryOp::Pow` (integer: exact power, overflow per policy, negative exponent →
+  `NegativeExponent` E0006 / trap 6; float: `ls_pow`), `Shift::Saturate`,
+  `OpError::NegativeExponent`; interpreter, validator, printer, parser. `promote` stays
+  unrepresentable.
+- `ls_pow` in `core`, bit for bit `specs/ops-vectors/pow.md` (all 122 vectors in
+  `tests/pow_vectors.rs`); the interpreter's float `pow`.
+- The fallibility rule as API: `BinaryOp::can_error(Policy, Type)` (signed `pow` under
+  `wrap`/`error` and signed `saturate` shifts need a `check`), `UnaryOp::can_error`,
+  `ConvOp::can_error`.
+- SSA construction (Braun et al. 2013) in the `Builder`: `Variable`, `declare_var`, `def_var`,
+  `use_var`, `seal_block`, `seal_all_blocks`, `is_sealed`; incomplete parameters in unsealed
+  blocks, on-the-fly forwarding of trivial parameters when a block is sealed, a fixpoint
+  removal in `seal_all_blocks`; edges pass only their target's own arguments; unassigned reads
+  give zero; iterative, with an open-addressing `(variable, block)` table.
+- Statepoint insertion: `Builder::insert_statepoints() -> StatepointStats`: validator-exact
+  reference liveness, GC lists extended (existing entries reused; invokes relocate through
+  `resN` on both edges), SSA repair over the finished graph, trivial-parameter removal,
+  post-validation as the oracle, transactional (restores the function on any error),
+  budgeted (`insert_statepoints_within`, default `DEFAULT_STATEPOINT_BUDGET` = 2^26 relocations
+  plus parameters).
+- Rewrite API: `remove_block_params` (any number, one linear pass), `move_inst` (O(1)).
+- Proof: OPS v2 conformance against independent references over every integer type, policy,
+  and edge value (`tests/ops_v2.rs`); SSA construction against the independent evaluator over
+  random mutable-variable programs with eager and lazy sealing plus a no-trivial-parameter
+  check (`tests/ssa.rs`); statepoint insertion on random GC-reference programs (allocations,
+  polls, pre-filled lists, explicit safepoints, invokes, `nogc` calls, branches, loops) checked
+  by the validator, idempotence, round trip, and the interpreter's moving-collector simulation
+  against an independent evaluator (`tests/statepoint.rs`); the differential generator now
+  emits `pow` and `saturate` shifts; benches for SSA construction, statepoint insertion,
+  `ls_pow`.
+
+Dependency wiring (decided here, recorded per the anti-deferral rule):
+- **Still no dependency.** `ls_pow` is copied operation for operation from the spec (and
+  checked against its vectors) rather than taken from bvm-lang, which is the VM tier and
+  must not be a dependency of the IR. ISSUES P31 suggested "a small shared crate or a module
+  copied verbatim into each tier"; this is the copy.
+
+Known limits, recorded:
+- A pointer *derived* from a reference and live across a safepoint is refused by
+  `insert_statepoints` (it cannot be relocated); rematerializing derived pointers from the
+  relocated base is not done. A front end recomputes them after safepoints.
+- `pow` and `saturate` shifts on signed types are fallible by type: a `check pow<overflow=wrap>`
+  whose exponent is a known non-negative constant cannot become a plain instruction (the
+  plain form is refused regardless of the operand's value). An optimizer keeps the `check`
+  or strength-reduces (`x ** 2` → `x * x`).
+- Variable construction tracks definitions per block and assumes in-order lowering; it is
+  refused alongside `split_block` while blocks are unsealed. It has no separate budget: it
+  creates at most one parameter per (variable, block) pair a read reaches, which is the size of
+  the pruned SSA form the front end asked for; table growth is bounded by `MAX_ENTITIES`.
 
 ## v2.0.0-beta.1 - consumer-driven fixes
 Exit criteria:
@@ -112,7 +171,13 @@ Exit criteria:
       and run in the interpreter with the same results as the bytecode tier.
 - [ ] opt-lang's first passes (SCCP via `interp::eval_*`, DCE, GVN) run on the rewrite API with
       the validator between passes; every API gap they hit is fixed here.
-- [ ] SSA updater + automatic statepoint insertion (moved here from alpha.1, see above).
+- [x] SSA updater + automatic statepoint insertion (moved here from alpha.1; delivered in
+      2.0.0-alpha.2 as `declare_var`/`use_var`/`seal_block` and `insert_statepoints`).
+- [ ] An SSA *updater* for passes over existing code (opt-lang's loop rotation, jump
+      threading): several definitions of one existing value, rewriting its uses. The
+      construction API does not cover it (`def_var` is refused on a terminated block, and it
+      records one definition per block); the repair engine inside `insert_statepoints` does
+      exactly this and can be exposed once opt-lang states the shape it needs.
 - [ ] Use lists or a cheap use-count query if opt-lang's profiles show full scans dominate.
 - [ ] Benchmarks: parse and print throughput (now ~1.5M and ~4M instructions/s) measured
       against the HIR → IR lowering's output sizes; improve the parser's token handling if it

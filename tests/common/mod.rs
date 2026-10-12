@@ -12,9 +12,9 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use ir_lang::{
-    BinaryOp, BlockArg, BlockCall, Builder, Call, CmpOp, ConvOp, DivZero, FloatToInt, FuncId,
-    Global, GlobalId, InstData, Linkage, MemFlags, Module, Overflow, Policy, Shift, Signature,
-    StackSlot, Type, Value,
+    BinaryOp, Block, BlockArg, BlockCall, Builder, Call, CmpOp, ConvOp, DivZero, FloatToInt,
+    FuncId, Global, GlobalId, InstData, Linkage, MemFlags, Module, Overflow, Policy, Shift,
+    Signature, StackSlot, Type, Value, Variable,
 };
 
 /// A small deterministic generator (xorshift64*), seeded by proptest.
@@ -72,6 +72,8 @@ pub enum Arith {
     Shr,
     Min,
     Max,
+    /// OPS v2 integer power.
+    Pow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -157,12 +159,15 @@ impl Gen<'_> {
         ]);
         let dz = self.rng.pick(&[DivZero::Error, DivZero::Trap]);
         match op {
-            Arith::Add | Arith::Sub | Arith::Mul => Policy::overflow(ov),
+            Arith::Add | Arith::Sub | Arith::Mul | Arith::Pow => Policy::overflow(ov),
             Arith::Div | Arith::FloorDiv => Policy::overflow(ov).with_div_zero(dz),
             Arith::Rem | Arith::FloorMod => Policy::div_zero(dz),
-            Arith::Shl | Arith::Shr => {
-                Policy::shift(self.rng.pick(&[Shift::Mask, Shift::Mask, Shift::Error]))
-            }
+            Arith::Shl | Arith::Shr => Policy::shift(self.rng.pick(&[
+                Shift::Mask,
+                Shift::Mask,
+                Shift::Error,
+                Shift::Saturate,
+            ])),
             _ => Policy::NONE,
         }
     }
@@ -195,6 +200,7 @@ impl Gen<'_> {
                     Arith::Shr,
                     Arith::Min,
                     Arith::Max,
+                    Arith::Pow,
                 ]);
                 let p = self.policy_for(op);
                 Expr::Bin(op, p, Box::new(self.expr(d)), Box::new(self.expr(d)))
@@ -395,6 +401,9 @@ fn bin(op: Arith, p: Policy, a: i64, b: i64) -> Result<i64, Exit> {
                 b as u32
             } else if p.shift == Some(Shift::Mask) {
                 (b & 63) as u32
+            } else if p.shift == Some(Shift::Saturate) && b >= 64 {
+                // OPS v2: every bit shifted out; `shr` keeps the sign.
+                return Ok(if op == Arith::Shr && a < 0 { -1 } else { 0 });
             } else {
                 return Err(Exit::Error(3));
             };
@@ -406,7 +415,51 @@ fn bin(op: Arith, p: Policy, a: i64, b: i64) -> Result<i64, Exit> {
         }
         Arith::Min => a.min(b),
         Arith::Max => a.max(b),
+        Arith::Pow => {
+            if b < 0 {
+                return Err(match p.overflow {
+                    Some(Overflow::Trap) => Exit::Trap(6),
+                    _ => Exit::Error(6),
+                });
+            }
+            match pow_exact(a, b as u64) {
+                Some(v) => v,
+                None => ovf(pow_wrapped(a, b as u64))?,
+            }
+        }
     })
+}
+
+/// The exact `a ** e` if it fits `i64` (an independent formulation: naive
+/// multiplication for small exponents, closed forms for |a| < 2).
+pub fn pow_exact(a: i64, e: u64) -> Option<i64> {
+    match a {
+        0 => return Some(i64::from(e == 0)),
+        1 => return Some(1),
+        -1 => return Some(if e % 2 == 0 { 1 } else { -1 }),
+        _ => {}
+    }
+    if e >= 64 {
+        return None; // |a| >= 2: at least 2^64
+    }
+    let mut acc: i64 = 1;
+    for _ in 0..e {
+        acc = acc.checked_mul(a)?;
+    }
+    Some(acc)
+}
+
+/// The low 64 bits of `a ** e` (most significant bit first, unlike the
+/// interpreter's squaring order).
+pub fn pow_wrapped(a: i64, e: u64) -> i64 {
+    let mut acc: i64 = 1;
+    for bit in (0..64).rev() {
+        acc = acc.wrapping_mul(acc);
+        if (e >> bit) & 1 == 1 {
+            acc = acc.wrapping_mul(a);
+        }
+    }
+    acc
 }
 
 fn float_to_i64(x: f64, p: FloatToInt) -> Result<i64, Exit> {
@@ -591,6 +644,8 @@ struct Lower<'b, 'm> {
     sig: ir_lang::SigId,
     vars: Value,
     array: Value,
+    mode: VarMode,
+    ssa: Vec<Variable>,
 }
 
 const F8: MemFlags = MemFlags {
@@ -614,7 +669,21 @@ fn arith_op(op: Arith) -> BinaryOp {
         Arith::Shr => BinaryOp::Shr,
         Arith::Min => BinaryOp::Min,
         Arith::Max => BinaryOp::Max,
+        Arith::Pow => BinaryOp::Pow,
     }
+}
+
+/// How the lowering keeps the program's mutable variables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VarMode {
+    /// In a stack slot, with loads and stores.
+    Memory,
+    /// As SSA values through the builder's variable construction, sealing each
+    /// block as soon as its predecessors are known.
+    SsaEager,
+    /// As SSA values, sealing nothing until the end (every read in an unsealed
+    /// block makes an incomplete parameter).
+    SsaLazy,
 }
 
 impl Lower<'_, '_> {
@@ -628,13 +697,23 @@ impl Lower<'_, '_> {
         self.b.ret(&[zero, status]).unwrap();
     }
 
-    /// Emits `data` as a plain instruction, or as a `check` terminator when its
-    /// policy can raise an error; returns the result.
+    /// Seals `block` when sealing eagerly.
+    fn seal(&mut self, block: Block) {
+        if self.mode == VarMode::SsaEager {
+            self.b.seal_block(block).unwrap();
+        }
+    }
+
+    /// Emits `data` as a plain instruction, or as a `check` terminator when it
+    /// can raise an error; returns the result.
     fn op(&mut self, data: InstData) -> Value {
         let can_error = match &data {
-            InstData::Unary { policy, .. }
-            | InstData::Binary { policy, .. }
-            | InstData::Convert { policy, .. } => policy.can_error(),
+            InstData::Unary { op, policy, .. } => op.can_error(*policy),
+            InstData::Binary { op, policy, args } => {
+                let ty = self.b.func().value_type(args[0]).unwrap();
+                op.can_error(*policy, ty)
+            }
+            InstData::Convert { op, policy, .. } => op.can_error(*policy),
             _ => false,
         };
         if !can_error {
@@ -655,9 +734,11 @@ impl Lower<'_, '_> {
             )
             .unwrap();
         self.b.switch_to(err).unwrap();
+        self.seal(err);
         let code = self.b.block_param(err, 0).unwrap();
         self.ret_status(code);
         self.b.switch_to(ok).unwrap();
+        self.seal(ok);
         self.b.block_param(ok, 0).unwrap()
     }
 
@@ -670,6 +751,9 @@ impl Lower<'_, '_> {
             Expr::Lit(v) => self.i64(*v),
             Expr::Param(i) => self.b.param(*i).unwrap(),
             Expr::Var(i) => {
+                if self.mode != VarMode::Memory {
+                    return self.b.use_var(self.ssa[*i]).unwrap();
+                }
                 let idx = self.i64(*i as i64);
                 let a = self.slot_addr(self.vars, idx);
                 self.b.load(Type::I64, a, F8).unwrap()
@@ -790,6 +874,7 @@ impl Lower<'_, '_> {
                         .unwrap();
                     // Landing pad: status = 100 + payload.
                     self.b.switch_to(pad).unwrap();
+                    self.seal(pad);
                     let exn = self.b.block_param(pad, 0).unwrap();
                     let k = self
                         .b
@@ -803,6 +888,7 @@ impl Lower<'_, '_> {
                     let s = self.b.add(k, hundred, Overflow::Wrap).unwrap();
                     self.ret_status(s);
                     self.b.switch_to(normal).unwrap();
+                    self.seal(normal);
                     (
                         self.b.block_param(normal, 0).unwrap(),
                         self.b.block_param(normal, 1).unwrap(),
@@ -819,8 +905,10 @@ impl Lower<'_, '_> {
                 let cont = self.b.create_block(&[]).unwrap();
                 self.b.branch(failed, fail, &[], cont, &[]).unwrap();
                 self.b.switch_to(fail).unwrap();
+                self.seal(fail);
                 self.ret_status(status);
                 self.b.switch_to(cont).unwrap();
+                self.seal(cont);
                 value
             }
         }
@@ -834,6 +922,10 @@ impl Lower<'_, '_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Set(v, e) if self.mode != VarMode::Memory => {
+                let x = self.expr(e);
+                self.b.def_var(self.ssa[*v], x).unwrap();
+            }
             Stmt::Set(v, e) => {
                 let x = self.expr(e);
                 let idx = self.i64(*v as i64);
@@ -849,12 +941,15 @@ impl Lower<'_, '_> {
                 let join = self.b.create_block(&[]).unwrap();
                 self.b.branch(c, tb, &[], eb, &[]).unwrap();
                 self.b.switch_to(tb).unwrap();
+                self.seal(tb);
                 self.stmts(t);
                 self.b.jump(join, &[]).unwrap();
                 self.b.switch_to(eb).unwrap();
+                self.seal(eb);
                 self.stmts(e);
                 self.b.jump(join, &[]).unwrap();
                 self.b.switch_to(join).unwrap();
+                self.seal(join);
             }
             Stmt::Loop(n, body) => {
                 let head = self.b.create_block(&[Type::U32]).unwrap();
@@ -868,11 +963,15 @@ impl Lower<'_, '_> {
                 let more = self.b.compare(CmpOp::Lt, i, limit).unwrap();
                 self.b.branch(more, inner, &[], exit, &[]).unwrap();
                 self.b.switch_to(inner).unwrap();
+                self.seal(inner);
                 self.stmts(body);
                 let one = self.b.iconst(Type::U32, 1).unwrap();
                 let next = self.b.add(i, one, Overflow::Wrap).unwrap();
                 self.b.jump(head, &[next]).unwrap();
+                // Both edges into the loop head exist now.
+                self.seal(head);
                 self.b.switch_to(exit).unwrap();
+                self.seal(exit);
             }
             Stmt::Store(i, v) => {
                 let i = self.expr(i);
@@ -900,17 +999,24 @@ impl Lower<'_, '_> {
                 // Code after a raise is unreachable; give it a fresh block.
                 let dead = self.b.create_block(&[]).unwrap();
                 self.b.switch_to(dead).unwrap();
+                self.seal(dead);
             }
             Stmt::Trap(c) => {
                 self.b.trap(u32::from(*c)).unwrap();
                 let dead = self.b.create_block(&[]).unwrap();
                 self.b.switch_to(dead).unwrap();
+                self.seal(dead);
             }
         }
     }
 }
 
 pub fn lower(prog: &Program) -> Lowered {
+    lower_with(prog, VarMode::Memory)
+}
+
+/// Lowers with the program's variables kept as `mode` says.
+pub fn lower_with(prog: &Program, mode: VarMode) -> Lowered {
     let mut module = Module::new("random");
     let sig = signature();
     let sig_id = module.intern_signature(&sig).unwrap();
@@ -940,6 +1046,22 @@ pub fn lower(prog: &Program) -> Lowered {
         b.memset(vars, zero, vlen, F8).unwrap();
         let alen = b.iconst(Type::U64, 64).unwrap();
         b.memset(array, zero, alen, F8).unwrap();
+        let ssa: Vec<Variable> = if mode == VarMode::Memory {
+            Vec::new()
+        } else {
+            let vs: Vec<Variable> = (0..VARS)
+                .map(|_| b.declare_var(Type::I64).unwrap())
+                .collect();
+            // The evaluator starts every variable at 0. Define some explicitly;
+            // the others rely on reads of an unassigned variable giving zero.
+            for (k, &v) in vs.iter().enumerate() {
+                if (i + k) % 2 == 0 {
+                    let z = b.iconst(Type::I64, 0).unwrap();
+                    b.def_var(v, z).unwrap();
+                }
+            }
+            vs
+        };
         let mut l = Lower {
             b: &mut b,
             funcs: &funcs,
@@ -947,6 +1069,8 @@ pub fn lower(prog: &Program) -> Lowered {
             sig: sig_id,
             vars,
             array,
+            mode,
+            ssa,
         };
         l.stmts(&def.body);
         match &def.tail {
@@ -960,6 +1084,9 @@ pub fn lower(prog: &Program) -> Lowered {
                 let y = l.expr(y);
                 l.b.tail_call(Call::direct(funcs[*g], &[x, y])).unwrap();
             }
+        }
+        if mode != VarMode::Memory {
+            b.seal_all_blocks().unwrap();
         }
     }
     Lowered {

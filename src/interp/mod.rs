@@ -626,6 +626,12 @@ fn int_binary(op: BinaryOp, policy: Policy, ty: Type, a: u64, b: u64) -> Result<
             let n = if y < 0 || y >= i128::from(w) {
                 match policy.shift {
                     Some(Shift::Mask) => (b & u64::from(w - 1)) as u32,
+                    // OPS v2 `saturate`: every bit is shifted out (an arithmetic
+                    // right shift keeps the sign); a negative amount is still
+                    // an error.
+                    Some(Shift::Saturate) if y >= 0 => {
+                        return Ok(if op == BinaryOp::Shr && x < 0 { m } else { 0 });
+                    }
                     _ => return Err(OpFault::Error(OpError::ShiftOutOfRange)),
                 }
             } else {
@@ -641,8 +647,46 @@ fn int_binary(op: BinaryOp, policy: Policy, ty: Type, a: u64, b: u64) -> Result<
         }
         BinaryOp::Min => Ok(if x <= y { a } else { b }),
         BinaryOp::Max => Ok(if x >= y { a } else { b }),
+        BinaryOp::Pow => int_pow(ty, policy, x, y, a),
         BinaryOp::IeeeRem | BinaryOp::TotalCmp => Ok(0),
     }
+}
+
+/// OPS v2 integer `pow`: the exact power of `x` (bits `a`) to `e >= 0`, or the
+/// `overflow` policy applied to the wrapped power; a negative exponent is
+/// `NegativeExponent`, a trap under `overflow = trap` and an error otherwise.
+fn int_pow(ty: Type, policy: Policy, x: i128, e: i128, a: u64) -> Result<u64, OpFault> {
+    if e < 0 {
+        return Err(match policy.overflow {
+            Some(Overflow::Trap) => OpFault::Trap(OpError::NegativeExponent),
+            _ => OpFault::Error(OpError::NegativeExponent),
+        });
+    }
+    let m = mask_for(ty, PointerWidth::P64);
+    // Repeated squaring, twice over: wrapping in u64 gives the low bits of the
+    // exact power (multiplication commutes with reduction mod 2^width); checked
+    // in i128 gives the exact power, or `None` once it exceeds i128, which is
+    // far beyond every type. A square is taken only while a higher exponent bit
+    // remains, so a square that overflows is always multiplied in.
+    let (mut wrapped, mut wbase) = (1u64, a);
+    let (mut power, mut base) = (Some(1i128), Some(x));
+    let mut e = e as u128;
+    loop {
+        if e & 1 == 1 {
+            wrapped = wrapped.wrapping_mul(wbase);
+            power = match (power, base) {
+                (Some(r), Some(b)) => r.checked_mul(b),
+                _ => None,
+            };
+        }
+        e >>= 1;
+        if e == 0 {
+            break;
+        }
+        wbase = wbase.wrapping_mul(wbase);
+        base = base.and_then(|b| b.checked_mul(b));
+    }
+    exact(ty, policy, power, wrapped & m)
 }
 
 /// Evaluates a binary operation on bits of type `ty` (OPS §3–§4). `total_cmp`
@@ -650,8 +694,8 @@ fn int_binary(op: BinaryOp, policy: Policy, ty: Type, a: u64, b: u64) -> Result<
 ///
 /// # Errors
 ///
-/// [`OpFault`] for integer overflow, division by zero, or an out-of-range shift
-/// under `error` or `trap`.
+/// [`OpFault`] for integer overflow, division by zero, an out-of-range shift, or
+/// a negative `pow` exponent, under `error` or `trap` (OPS §3, §6).
 ///
 /// # Examples
 ///
@@ -691,6 +735,14 @@ pub fn eval_binary(op: BinaryOp, policy: Policy, ty: Type, a: u64, b: u64) -> Re
         ),
         BinaryOp::Min => float_op(ty, a, b, fmin32, fmin),
         BinaryOp::Max => float_op(ty, a, b, fmax32, fmax),
+        // OPS v2: the shared routine; `f32` widens, computes, and rounds once.
+        BinaryOp::Pow => float_op(
+            ty,
+            a,
+            b,
+            |x, y| crate::pow::ls_pow(f64::from(x), f64::from(y)) as f32,
+            crate::pow::ls_pow,
+        ),
         BinaryOp::TotalCmp => {
             let ord = if ty == Type::F32 {
                 f32::from_bits(a as u32).total_cmp(&f32::from_bits(b as u32))

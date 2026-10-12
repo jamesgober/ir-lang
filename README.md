@@ -21,7 +21,7 @@
         <strong>ir-lang</strong> is the SSA intermediate representation of a native compiler: what a front end lowers into after monomorphization, closure conversion, pattern compilation, and effect lowering, what an optimizer rewrites, and what instruction selection reads. A <code>Module</code> holds functions, globals, and aggregate types; a function is a control-flow graph whose blocks take <strong>parameters</strong> instead of phi nodes, and every value has one type and one definition.
     </p>
     <p>
-        The instruction set covers every operation of the family's shared operation semantics with its overflow, division, shift, and conversion <strong>policy on each instance</strong>, so every tier computes the same result; calls (direct, indirect, tail) and <code>invoke</code> with exception edges; operation errors routed to explicit error edges; memory with alignment, volatility, atomics, and address computation; and <strong>safepoints that relocate GC references</strong>, so native frames can be scanned by a moving collector. A validator checks all of it, a builder doubles as a rewrite API for optimization passes, a printer and a budgeted parser round-trip exactly, and a reference interpreter implements the semantics as the oracle for optimizers and backends. It is a SEMA/CODE-tier crate of the <code>-lang</code> language-construction family.
+        The instruction set covers every operation of the family's shared operation semantics (OPS v2, including <code>pow</code> and saturating shifts) with its overflow, division, shift, and conversion <strong>policy on each instance</strong>, so every tier computes the same result; calls (direct, indirect, tail) and <code>invoke</code> with exception edges; operation errors routed to explicit error edges; memory with alignment, volatility, atomics, and address computation; and <strong>safepoints that relocate GC references</strong>, so native frames can be scanned by a moving collector. A validator checks all of it, a builder doubles as a rewrite API for optimization passes and <strong>constructs SSA from mutable variables</strong>, a <strong>statepoint pass</strong> fills GC lists from liveness, a printer and a budgeted parser round-trip exactly, and a reference interpreter implements the semantics as the oracle for optimizers and backends. It is a SEMA/CODE-tier crate of the <code>-lang</code> language-construction family.
     </p>
     <br>
     <hr>
@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>no_std</code>-compatible (needs only <code>alloc</code>; the interpreter needs <code>std</code>), <code>#![forbid(unsafe_code)]</code>, no dependencies.
     </p>
     <blockquote>
-        <strong>2.0.0-alpha.1 is a pre-release</strong> of the 2.0 redesign. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is <code>_lexersketch/specs/IR.md</code>; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
+        <strong>2.0.0-alpha.2 is a pre-release</strong> of the 2.0 redesign. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is <code>_lexersketch/specs/IR.md</code>; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 - A **[`Module`](./docs/API.md#module)** declares functions (with a [`Signature`](./docs/API.md#signature) and a calling-convention tag, a linkage, and attributes), [globals](./docs/API.md#global) with initializers and relocations, and [aggregates](./docs/API.md#aggregate) (structs, packed structs, arrays) with C layout.
 - A **[`Function`](./docs/API.md#function)** body is blocks of [instructions](./docs/API.md#instdata) ended by one [terminator](./docs/API.md#terminator). Values cross edges as block arguments.
-- A **[`Builder`](./docs/API.md#builder)** lowers into a body and rewrites it. Every instruction is type-checked as it is added.
+- A **[`Builder`](./docs/API.md#builder)** lowers into a body and rewrites it. Every instruction is type-checked as it is added. Mutable locals lower through **[variables](./docs/API.md#ssa-construction)** (`declare_var` / `def_var` / `use_var` / `seal_block`); GC references can be used freely and **[`insert_statepoints`](./docs/API.md#builderinsert_statepoints)** relocates them.
 - **[`Module::validate`](./docs/API.md#modulevalidate)** checks everything; **`Display`** and **[`parse`](./docs/API.md#parse)** are the textual form.
 - **[`interp`](./docs/API.md#interp-feature-interp)** (feature `interp`) runs it.
 
@@ -53,7 +53,9 @@ What it guarantees, and how each guarantee is checked:
 | A well-typed program built with the builder validates. | Property tests lower thousands of random programs (loops, calls, invokes, tail calls, memory, globals, checked arithmetic, exceptions) and validate each. |
 | Dominance and the safepoint rule are decided exactly. | Property tests compare the validator with brute-force references on random control-flow graphs (loops, unreachable blocks, block parameters): dominance by path removal, reference liveness by path search. |
 | Validation is total: it accepts or reports, never panics. | A sweep corrupts internal state thousands of times; property tests validate mutated text and the results of hostile rewrites. |
-| Operations follow `specs/OPS.md` exactly, on every type and policy. | The interpreter is compared against independent reference arithmetic on the OPS edge values of every integer type and policy, IEEE special cases, and exact rational checks of `ieee_rem`. |
+| Operations follow `specs/OPS.md` (v2) exactly, on every type and policy. | The interpreter is compared against independent reference arithmetic on the OPS edge values of every integer type and policy (integer `pow` and `shift = saturate` included), IEEE special cases, and exact rational checks of `ieee_rem`; float `pow` (`ls_pow`) matches all 122 vectors of `specs/ops-vectors/pow.md` bit for bit. |
+| SSA construction from mutable variables preserves meaning and leaves no trivial block parameter. | Random programs with mutable variables, loops, invokes, and checked arithmetic are lowered through `def_var`/`use_var`, sealing blocks eagerly and lazily, and run against the independent evaluator; every result is checked for trivial parameters. |
+| Statepoint insertion makes reference-carrying code valid without changing it. | Random programs keep references in variables across allocations, polls, safepoints, and invokes; after insertion they validate (the validator is the oracle), a second insertion changes nothing, and the interpreter's moving-collector simulation computes what an independent evaluator does. |
 | Lowered programs mean what the source means. | Differential tests run each random program in an independent evaluator and, lowered, in the interpreter, before and after a print/parse round trip; results, traps, and exceptions agree exactly. |
 | The textual form round-trips exactly. | `parse(print(m))` prints identically and keeps every handle, over random programs and a module containing every instruction form. |
 | Rewrites keep IR valid and meaning intact. | Random sequences of rewrites (split, duplicate-and-forward, remove dead code, swap operands, compact) are validated after every step and the result run against the evaluator. |
@@ -67,21 +69,21 @@ What it guarantees, and how each guarantee is checked:
 
 ```toml
 [dependencies]
-ir-lang = "2.0.0-alpha.1"
+ir-lang = "2.0.0-alpha.2"
 ```
 
 With the reference interpreter:
 
 ```toml
 [dependencies]
-ir-lang = { version = "2.0.0-alpha.1", features = ["interp"] }
+ir-lang = { version = "2.0.0-alpha.2", features = ["interp"] }
 ```
 
 Without the standard library:
 
 ```toml
 [dependencies]
-ir-lang = { version = "2.0.0-alpha.1", default-features = false }
+ir-lang = { version = "2.0.0-alpha.2", default-features = false }
 ```
 
 <hr>
@@ -153,6 +155,51 @@ m.validate()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Mutable locals and GC references
+
+A front end names its mutable locals with variables and lets the builder place the block parameters; it keeps GC references in ordinary values across calls and lets `insert_statepoints` relocate them:
+
+```rust
+use ir_lang::{Call, CmpOp, Linkage, Module, Signature, Type};
+
+// fn keep(r: ref, n: i64) -> ref { let mut x = r; let mut i = 0; while i < n { poll(); i += 1 } x }
+let mut m = Module::new("demo");
+let poll = m.declare_function("poll", &Signature::new(&[], &[]), Linkage::Import)?;
+let f = m.declare_function("keep", &Signature::new(&[Type::Ref, Type::I64], &[Type::Ref]), Linkage::Export)?;
+let mut b = m.build(f)?;
+let (x, i) = (b.declare_var(Type::Ref)?, b.declare_var(Type::I64)?);
+let (r, n) = (b.param(0)?, b.param(1)?);
+b.def_var(x, r)?;
+let zero = b.iconst(Type::I64, 0)?;
+b.def_var(i, zero)?;
+let (head, body, exit) = (b.create_block(&[])?, b.create_block(&[])?, b.create_block(&[])?);
+b.jump(head, &[])?;
+b.switch_to(head)?;
+let iv = b.use_var(i)?;
+let more = b.compare(CmpOp::Lt, iv, n)?;
+b.branch(more, body, &[], exit, &[])?;
+b.switch_to(body)?;
+b.seal_block(body)?;
+b.call(Call::direct(poll, &[]))?; // a safepoint; `x` is live across it
+let iv = b.use_var(i)?;
+let one = b.iconst(Type::I64, 1)?;
+let i2 = b.add(iv, one, ir_lang::Overflow::Wrap)?;
+b.def_var(i, i2)?;
+b.jump(head, &[])?;
+b.seal_block(head)?;
+b.switch_to(exit)?;
+b.seal_block(exit)?;
+let xv = b.use_var(x)?;
+b.ret(&[xv])?;
+b.seal_all_blocks()?;
+
+assert!(b.validate().is_err()); // `x` is used after the poll without relocation
+let stats = b.insert_statepoints()?;
+assert_eq!(stats.relocations, 1);
+m.validate()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ### Running it
 
 With the `interp` feature, the reference interpreter runs a module with the exact operation semantics:
@@ -195,6 +242,15 @@ Measured with `cargo bench` (criterion) on the development machine (Windows, x86
 | Parse, diamonds | 652 ms | 1.5 M/s |
 | Compact, diamonds | 144 ms | 7.0 M/s |
 | Validate 100k safepoints relocating a reference | 12 ms | 8.1 M/s |
+
+New in 2.0.0-alpha.2, measured while other builds shared the machine (the unchanged safepoint validation above varied between 11 and 40 ms in the same session, so read these as upper bounds):
+
+| Operation | Time | Throughput |
+|---|---|---|
+| SSA construction, 100k instructions of diamonds through variables | 59–112 ms | about 1.3 M instructions/s |
+| SSA construction, 1M instructions | 0.75–1.24 s | about 1.1 M/s |
+| `insert_statepoints`, 100k instructions (33k safepoints, two references live across each, 66k join parameters) | 165–229 ms | about 0.5 M/s |
+| `ls_pow`, 10,000 calls | 4.6–5.4 ms | about 2 M calls/s |
 
 The textual form is for tests and debugging; nothing on the compile path parses text.
 

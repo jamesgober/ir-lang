@@ -29,7 +29,7 @@ use crate::ops::ConvOp;
 use crate::types::Type;
 use crate::typing;
 
-fn is_safepoint_inst(decls: &Decls, data: &InstData) -> bool {
+pub(crate) fn is_safepoint_inst(decls: &Decls, data: &InstData) -> bool {
     match data {
         InstData::Call(call) => typing::call_is_safepoint(decls, call),
         InstData::Safepoint { .. } => true,
@@ -37,7 +37,7 @@ fn is_safepoint_inst(decls: &Decls, data: &InstData) -> bool {
     }
 }
 
-fn is_safepoint_term(decls: &Decls, term: &Terminator) -> bool {
+pub(crate) fn is_safepoint_term(decls: &Decls, term: &Terminator) -> bool {
     matches!(term, Terminator::Invoke { call, .. } if typing::call_is_safepoint(decls, call))
 }
 

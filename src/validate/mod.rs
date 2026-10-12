@@ -7,8 +7,8 @@
 //! Every walk is iterative and every check is linear in the size of the function
 //! (the safepoint check is linear in the live ranges of GC references).
 
-mod dom;
-mod gc;
+pub(crate) mod dom;
+pub(crate) mod gc;
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -177,6 +177,17 @@ pub(crate) fn validate_body(
     id: FuncId,
     func: &Function,
 ) -> Result<(), ValidationError> {
+    let (cfg, idom) = validate_structure(decls, id, func)?;
+    gc::check_safepoints(decls, id, func, &cfg, &idom)
+}
+
+/// Every check except the safepoint rules (steps 1-8 of IR.md §11); returns the
+/// control-flow graph and the dominators for the last step.
+pub(crate) fn validate_structure(
+    decls: &Decls,
+    id: FuncId,
+    func: &Function,
+) -> Result<(Cfg, dom::Idom), ValidationError> {
     let Some(decl) = decls.funcs.get(id.index()) else {
         return Err(ValidationError::module(K::UnknownFunction { func: id }));
     };
@@ -221,7 +232,7 @@ pub(crate) fn validate_body(
     let cfg = Cfg::of(func);
     let idom = dom::compute_idoms(func.entry().index(), &cfg);
     dom::check_dominance(id, func, &cfg, &idom, &defined)?;
-    gc::check_safepoints(decls, id, func, &cfg, &idom)
+    Ok((cfg, idom))
 }
 
 fn check_entry(id: FuncId, func: &Function, params: &[Type]) -> Result<(), ValidationError> {

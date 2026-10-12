@@ -16,6 +16,13 @@
 //! computation); and safepoints that relocate GC references, so native frames
 //! can be scanned by a moving collector.
 //!
+//! A front end lowers mutable locals through the builder's SSA construction
+//! ([`Builder::declare_var`], [`Builder::def_var`], [`Builder::use_var`],
+//! [`Builder::seal_block`]), and may use GC references freely across calls and
+//! let [`Builder::insert_statepoints`] fill the GC lists from liveness. The
+//! operations are OPS v2 (`pow`, `shift = saturate`, `NegativeExponent`), with
+//! the shared float power routine [`ls_pow`] available without `std`.
+//!
 //! ## Quick start
 //!
 //! Build, validate, print, and parse back `fn add1(x: i64) -> i64 { x + 1 }`:
@@ -60,7 +67,7 @@
 //!
 //! ## Stability
 //!
-//! This is `2.0.0-alpha.1`, a pre-release of the 2.0 redesign. The surface may
+//! This is `2.0.0-alpha.2`, a pre-release of the 2.0 redesign. The surface may
 //! change before `2.0.0`; see `dev/ROADMAP.md`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -91,7 +98,10 @@ mod inst;
 mod module;
 mod ops;
 mod parse;
+mod pow;
 mod print;
+mod ssa;
+mod statepoint;
 mod types;
 mod typing;
 mod validate;
@@ -101,7 +111,9 @@ mod validate;
 pub mod interp;
 
 pub use builder::{Builder, Position, Remap};
-pub use entity::{AggId, Block, FuncId, GlobalId, Inst, SigId, StackSlot, Value, ValueRange};
+pub use entity::{
+    AggId, Block, FuncId, GlobalId, Inst, SigId, StackSlot, Value, ValueRange, Variable,
+};
 pub use error::{BuildError, ModuleError, ValidationError, ValidationErrorKind};
 pub use function::{Function, Insts, MAX_ENTITIES, SlotData, ValueDef};
 pub use inst::{
@@ -114,6 +126,8 @@ pub use ops::{
     UnaryOp,
 };
 pub use parse::{ParseError, ParseErrorKind, ParseLimits, parse, parse_with};
+pub use pow::ls_pow;
+pub use statepoint::{DEFAULT_STATEPOINT_BUDGET, StatepointStats};
 pub use types::{
     Aggregate, CallConv, Layout, MAX_AGGREGATE_SIZE, MemType, PointerWidth, Signature, Type,
 };

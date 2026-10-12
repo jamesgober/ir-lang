@@ -149,6 +149,16 @@ handle!(
     "t3"
 );
 
+handle!(
+    /// A mutable local variable of the builder's SSA construction
+    /// ([`Builder::declare_var`](crate::Builder::declare_var)): a name for "the
+    /// current value of `x`" that the builder turns into SSA values and block
+    /// parameters. Scoped to one builder. In messages it prints as `var<n>`.
+    Variable,
+    "var",
+    "var3"
+);
+
 /// The results of one instruction: a run of consecutive values.
 ///
 /// An instruction defines zero or more values, always with consecutive handles, so

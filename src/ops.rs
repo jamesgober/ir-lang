@@ -7,7 +7,8 @@
 //! [`Policy::required_unary`], [`Policy::required_binary`], and [`Policy::required_conversion`] are that table.
 //!
 //! `promote` (OPS §2) is not representable: it is only valid on dynamically typed
-//! results, and every ir-lang value has a static type.
+//! results, and every ir-lang value has a static type. This is OPS v2: `pow`,
+//! `shift = saturate`, and the `NegativeExponent` (E0006) error kind included.
 
 use core::fmt;
 
@@ -92,6 +93,12 @@ pub enum BinaryOp {
     Max,
     /// Float IEEE 754 totalOrder comparison, giving an `i8` of `-1`, `0`, or `1`.
     TotalCmp,
+    /// Power (OPS v2). Integer: the exact power by repeated squaring, `0 ** 0 = 1`,
+    /// an unrepresentable result per `overflow`; a negative exponent (signed types
+    /// only) raises `NegativeExponent` (E0006), or traps with that code under
+    /// `overflow = trap`. Float: the family's shared `ls_pow` routine
+    /// ([`ls_pow`](crate::ls_pow)), bit-identical on every tier.
+    Pow,
 }
 
 /// A comparison. Both operands have the same type; the result is `bool`.
@@ -250,6 +257,7 @@ named!(BinaryOp {
     Min => "min",
     Max => "max",
     TotalCmp => "total_cmp",
+    Pow => "pow",
 });
 
 named!(CmpOp {
@@ -324,6 +332,7 @@ pub enum DivZero {
 /// use ir_lang::Shift;
 ///
 /// assert_eq!(Shift::Mask.name(), "mask");
+/// assert_eq!(Shift::from_name("saturate"), Some(Shift::Saturate));
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[non_exhaustive]
@@ -332,6 +341,12 @@ pub enum Shift {
     Error,
     /// Use the amount modulo the bit width (`amount & (width - 1)`).
     Mask,
+    /// OPS v2 (PHP semantics): an amount at least the bit width gives `0` for
+    /// `shl`, and for `shr` `0` (unsigned or non-negative) or `-1` (negative
+    /// signed). A **negative** amount is still `ShiftOutOfRange`, so on a signed
+    /// type the operation can fail and belongs in a `check` terminator; on an
+    /// unsigned type it never fails.
+    Saturate,
 }
 
 /// What `float_to_int` does with NaN or an out-of-range value.
@@ -395,7 +410,7 @@ macro_rules! policy_names {
 
 policy_names!(Overflow { Error => "error", Wrap => "wrap", Trap => "trap" });
 policy_names!(DivZero { Error => "error", Trap => "trap" });
-policy_names!(Shift { Error => "error", Mask => "mask" });
+policy_names!(Shift { Error => "error", Mask => "mask", Saturate => "saturate" });
 policy_names!(FloatToInt { Error => "error", Saturate => "saturate" });
 
 /// The policy carried by one operation instance.
@@ -599,8 +614,14 @@ impl Policy {
         self
     }
 
-    /// Whether any field is `error`: such an operation can fail, and is only valid
-    /// inside a `check` terminator.
+    /// Whether any field is `error`.
+    ///
+    /// For unary operations and conversions other than `char_from_u32` this is
+    /// exactly whether the operation can raise an error. A binary operation can
+    /// also raise one without an `error` field (`pow` with a negative exponent,
+    /// `shl`/`shr` under `saturate` with a negative amount): use
+    /// [`BinaryOp::can_error`], [`UnaryOp::can_error`], and [`ConvOp::can_error`]
+    /// for the rule the validator applies.
     ///
     /// # Examples
     ///
@@ -661,6 +682,7 @@ impl Policy {
                         | BinaryOp::Mul
                         | BinaryOp::Div
                         | BinaryOp::FloorDiv
+                        | BinaryOp::Pow
                 ),
             div_zero: int
                 && matches!(
@@ -691,6 +713,85 @@ impl Policy {
             shift: false,
             float_to_int: matches!(op, ConvOp::FloatToInt),
         }
+    }
+}
+
+impl UnaryOp {
+    /// Whether this operation under `policy` can raise an OPS error, so that it is
+    /// only valid as the operation of a `check` terminator (and a `check` of it is
+    /// valid). For unary operations this is [`Policy::can_error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ir_lang::{Overflow, Policy, UnaryOp};
+    ///
+    /// assert!(UnaryOp::Neg.can_error(Policy::overflow(Overflow::Error)));
+    /// assert!(!UnaryOp::Neg.can_error(Policy::overflow(Overflow::Trap)));
+    /// ```
+    #[must_use]
+    pub const fn can_error(self, policy: Policy) -> bool {
+        policy.can_error()
+    }
+}
+
+impl BinaryOp {
+    /// Whether this operation on operands of type `ty` under `policy` can raise an
+    /// OPS error, so that it is only valid as the operation of a `check`
+    /// terminator (and a `check` of it is valid).
+    ///
+    /// Besides any `error` field, two OPS v2 rules raise errors on signed types:
+    /// integer `pow` with a negative exponent raises `NegativeExponent` under
+    /// every `overflow` policy except `trap` (which traps with that code), and
+    /// `shl`/`shr` under `shift = saturate` raise `ShiftOutOfRange` for a negative
+    /// amount. Unsigned operands cannot be negative, so neither rule applies to
+    /// them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ir_lang::{BinaryOp, Overflow, Policy, Shift, Type};
+    ///
+    /// let wrap = Policy::overflow(Overflow::Wrap);
+    /// assert!(BinaryOp::Pow.can_error(wrap, Type::I32)); // a negative exponent
+    /// assert!(!BinaryOp::Pow.can_error(wrap, Type::U32));
+    /// assert!(!BinaryOp::Pow.can_error(Policy::overflow(Overflow::Trap), Type::I32));
+    /// let sat = Policy::shift(Shift::Saturate);
+    /// assert!(BinaryOp::Shl.can_error(sat, Type::I8)); // a negative amount
+    /// assert!(!BinaryOp::Shl.can_error(sat, Type::U8));
+    /// ```
+    #[must_use]
+    pub const fn can_error(self, policy: Policy, ty: Type) -> bool {
+        if policy.can_error() {
+            return true;
+        }
+        if !ty.is_signed_int() {
+            return false;
+        }
+        match self {
+            BinaryOp::Pow => !matches!(policy.overflow, Some(Overflow::Trap)),
+            BinaryOp::Shl | BinaryOp::Shr => matches!(policy.shift, Some(Shift::Saturate)),
+            _ => false,
+        }
+    }
+}
+
+impl ConvOp {
+    /// Whether this conversion under `policy` can raise an OPS error, so that it
+    /// is only valid as the operation of a `check` terminator: an `error` field,
+    /// or `char_from_u32`, which always can.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ir_lang::{ConvOp, Policy};
+    ///
+    /// assert!(ConvOp::CharFromU32.can_error(Policy::NONE));
+    /// assert!(!ConvOp::Zext.can_error(Policy::NONE));
+    /// ```
+    #[must_use]
+    pub const fn can_error(self, policy: Policy) -> bool {
+        policy.can_error() || matches!(self, ConvOp::CharFromU32)
     }
 }
 
@@ -732,6 +833,7 @@ impl fmt::Display for Policy {
 ///
 /// assert_eq!(OpError::DivByZero.code(), 2);
 /// assert_eq!(OpError::from_code(5), Some(OpError::InvalidChar));
+/// assert_eq!(OpError::from_code(6), Some(OpError::NegativeExponent));
 /// assert_eq!(OpError::ArithOverflow.to_string(), "E0001 ArithOverflow");
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -747,6 +849,8 @@ pub enum OpError {
     InvalidConversion,
     /// `E0005`: `char_from_u32` of a value that is not a Unicode scalar value.
     InvalidChar,
+    /// `E0006` (OPS v2): integer `pow` with a negative exponent.
+    NegativeExponent,
 }
 
 impl OpError {
@@ -767,6 +871,7 @@ impl OpError {
             OpError::ShiftOutOfRange => 3,
             OpError::InvalidConversion => 4,
             OpError::InvalidChar => 5,
+            OpError::NegativeExponent => 6,
         }
     }
 
@@ -788,6 +893,7 @@ impl OpError {
             3 => OpError::ShiftOutOfRange,
             4 => OpError::InvalidConversion,
             5 => OpError::InvalidChar,
+            6 => OpError::NegativeExponent,
             _ => return None,
         })
     }
@@ -799,6 +905,7 @@ impl OpError {
             OpError::ShiftOutOfRange => "ShiftOutOfRange",
             OpError::InvalidConversion => "InvalidConversion",
             OpError::InvalidChar => "InvalidChar",
+            OpError::NegativeExponent => "NegativeExponent",
         }
     }
 }
@@ -870,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_error_codes_round_trip() {
-        for code in 1..=5 {
+        for code in 1..=6 {
             let e = OpError::from_code(code);
             assert_eq!(e.map(OpError::code), Some(code));
         }

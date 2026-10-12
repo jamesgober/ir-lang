@@ -3,7 +3,7 @@
 use alloc::string::String;
 use core::fmt;
 
-use crate::entity::{AggId, Block, FuncId, GlobalId, Inst, SigId, StackSlot, Value};
+use crate::entity::{AggId, Block, FuncId, GlobalId, Inst, SigId, StackSlot, Value, Variable};
 use crate::ops::PolicyFields;
 use crate::types::Type;
 
@@ -653,6 +653,31 @@ pub enum BuildError {
     Invalid(ValidationErrorKind),
     /// A function table reached its capacity (`u32::MAX - 1` entries).
     CapacityExceeded,
+    /// The variable was not declared by this builder (or the builder's variable
+    /// state was dropped by [`compact`](crate::Builder::compact)).
+    UnknownVariable {
+        /// The variable.
+        var: Variable,
+    },
+    /// An edge targets a block that was sealed: every edge into it was declared
+    /// to exist already ([`Builder::seal_block`](crate::Builder::seal_block)).
+    SealedBlock {
+        /// The sealed block.
+        block: Block,
+    },
+    /// The value is not a parameter of a live block.
+    NotBlockParam {
+        /// The value.
+        value: Value,
+    },
+    /// The operation conflicts with variable construction in progress: splitting
+    /// a block while blocks are unsealed, or adding a parameter to a block the
+    /// construction already added parameters to.
+    VariablesActive,
+    /// A whole-function transformation would exceed its work budget
+    /// ([`Builder::insert_statepoints_within`](crate::Builder::insert_statepoints_within));
+    /// nothing was changed.
+    BudgetExceeded,
 }
 
 impl fmt::Display for BuildError {
@@ -671,6 +696,17 @@ impl fmt::Display for BuildError {
             }
             BuildError::Invalid(kind) => write!(f, "{kind}"),
             BuildError::CapacityExceeded => f.write_str("function table capacity exceeded"),
+            BuildError::UnknownVariable { var } => write!(f, "unknown variable {var}"),
+            BuildError::SealedBlock { block } => {
+                write!(f, "block {block} is sealed and cannot get a new edge")
+            }
+            BuildError::NotBlockParam { value } => {
+                write!(f, "value {value} is not a block parameter")
+            }
+            BuildError::VariablesActive => {
+                f.write_str("not allowed while variable construction is in progress")
+            }
+            BuildError::BudgetExceeded => f.write_str("the operation's work budget was exceeded"),
         }
     }
 }
@@ -708,6 +744,17 @@ mod tests {
             BuildError::CapacityExceeded,
             BuildError::UnknownParam { index: 3 },
             BuildError::Invalid(ValidationErrorKind::BadOrdering),
+            BuildError::UnknownVariable {
+                var: Variable::from_u32(1),
+            },
+            BuildError::SealedBlock {
+                block: Block::from_u32(1),
+            },
+            BuildError::NotBlockParam {
+                value: Value::from_u32(1),
+            },
+            BuildError::VariablesActive,
+            BuildError::BudgetExceeded,
         ];
         for e in errs {
             assert!(!e.to_string().is_empty());
