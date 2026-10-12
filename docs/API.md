@@ -1,6 +1,6 @@
 # ir-lang &mdash; API Reference
 
-> Complete reference for every public item in `ir-lang` 2.0.0-alpha.2, with examples.
+> Complete reference for every public item in `ir-lang` 2.0.0-alpha.3, with examples.
 > **Status: pre-release.** The surface may change before `2.0.0`; see
 > [`../dev/ROADMAP.md`](../dev/ROADMAP.md). The normative semantics are
 > `_lexersketch/specs/IR.md` (the IR) and `_lexersketch/specs/OPS.md` (operations).
@@ -65,9 +65,9 @@
 
 ```toml
 [dependencies]
-ir-lang = "2.0.0-alpha.1"                                              # the IR
-ir-lang = { version = "2.0.0-alpha.1", features = ["interp"] }         # plus the interpreter
-ir-lang = { version = "2.0.0-alpha.1", default-features = false }      # no_std + alloc
+ir-lang = "2.0.0-alpha.3"                                              # the IR
+ir-lang = { version = "2.0.0-alpha.3", features = ["interp"] }         # plus the interpreter
+ir-lang = { version = "2.0.0-alpha.3", default-features = false }      # no_std + alloc
 ```
 
 ## Quick start
@@ -133,9 +133,10 @@ needs for its operand class ([`Policy::required_binary`](#policy) and siblings).
 `error` means the operation can raise an error, so it must be the operation of a `check`
 terminator; `trap` aborts the program; `wrap`, `mask`, `saturate` never fail by themselves.
 Two OPS v2 rules raise errors on **signed** types without an `error` field: integer `pow` with a
-negative exponent (`NegativeExponent`, E0006, under every `overflow` but `trap`, which traps with
-that code), and `shl`/`shr` under `shift = saturate` with a negative amount
-(`ShiftOutOfRange`). So on a signed type `pow<overflow=wrap>`, `pow<overflow=error>`, and
+negative exponent (`NegativeExponent`, E0006, under **every** `overflow` policy, `trap`
+included: `trap` covers an unrepresentable power, never a negative exponent), and `shl`/`shr`
+under `shift = saturate` with a negative amount (`ShiftOutOfRange`). So on a signed type every
+integer `pow` (`<overflow=wrap>`, `<overflow=error>`, `<overflow=trap>`) and
 `shl<shift=saturate>` belong in a `check`; on an unsigned type they do not (except an `error`
 field). The rule is [`BinaryOp::can_error`](#operations) (and `UnaryOp::can_error`,
 `ConvOp::can_error`). `promote` does not exist here (every value is statically typed).
@@ -772,7 +773,8 @@ char_from_u32 bool_to_int ptr_to_int int_to_ptr ref_to_ptr`). Each has `ALL`, `n
 
 `pow` (OPS v2) takes two operands of one integer or float type. Integer: the exact power,
 `0 ** 0 = 1`, an unrepresentable result per `overflow` (`wrap` keeps the low bits); a negative
-exponent is `NegativeExponent` (E0006), a trap with that code under `overflow = trap`. Float:
+exponent is the `NegativeExponent` error (E0006) under every `overflow` policy, `trap` included
+(OPS §3, §6), so a signed integer `pow` is always the operation of a `check`. Float:
 [`ls_pow`](#ls_pow), no policy; `f32` widens, computes, and rounds once.
 
 Fallibility (what must be in a `check`): `UnaryOp::can_error(Policy)`,
@@ -783,6 +785,8 @@ use ir_lang::{BinaryOp, ConvOp, Overflow, Policy, Shift, Type, UnaryOp};
 
 assert!(BinaryOp::Pow.can_error(Policy::overflow(Overflow::Wrap), Type::I64));
 assert!(!BinaryOp::Pow.can_error(Policy::overflow(Overflow::Wrap), Type::U64));
+assert!(BinaryOp::Pow.can_error(Policy::overflow(Overflow::Trap), Type::I64)); // since alpha.3
+assert!(!BinaryOp::Pow.can_error(Policy::overflow(Overflow::Trap), Type::U64));
 assert!(BinaryOp::Shr.can_error(Policy::shift(Shift::Saturate), Type::I32));
 assert!(ConvOp::CharFromU32.can_error(Policy::NONE));
 assert!(!UnaryOp::Neg.can_error(Policy::overflow(Overflow::Trap)));
@@ -945,7 +949,7 @@ assert_eq!(interp::run(&m, f, &[Val::u8(200)])?, Outcome::Trap(1));
 | `Val` | A typed bit pattern: `new`, `i8`…`u64`, `f32`, `f64`, `bool`, `ptr`; `ty`, `bits`, `as_i128`, `as_f64`, `as_bool`, `same_as` (NaN-equivalent). |
 | `Memory` | `read`, `write`, `alloc` (host heap), `alloc_object` (a GC object; returns a `ref`), `ref_address`. |
 | `Host`, `HostReturn`, `NoHost` | Implement imported functions. |
-| `eval_unary`, `eval_binary`, `eval_compare`, `eval_convert`, `eval_fma`, `OpFault` | Per-operation OPS semantics on bits, for constant folding (OPS v2: `pow` via `ls_pow`, `shift = saturate`, `NegativeExponent`). |
+| `eval_unary`, `eval_binary`, `eval_compare`, `eval_convert`, `eval_fma`, `OpFault` | Per-operation OPS semantics on bits, for constant folding (OPS v2: `pow` via `ls_pow`, `shift = saturate`, `NegativeExponent`). `OpFault::Trap` only for a `trap` policy field; a negative `pow` exponent is `OpFault::Error(NegativeExponent)` under every policy. |
 
 Every safepoint starts a new GC epoch; using a reference from an earlier epoch is `StaleRef`, so
 a missing relocation is caught at run time.
@@ -970,6 +974,7 @@ a missing relocation is caught at run time.
 
 ## Stability
 
-`2.0.0-alpha.2` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
-[`CHANGELOG.md`](../CHANGELOG.md) (2.0.0-alpha.2 lists those since alpha.1). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
+`2.0.0-alpha.3` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
+[`CHANGELOG.md`](../CHANGELOG.md) (2.0.0-alpha.2 lists those since alpha.1, 2.0.0-alpha.3 those
+since alpha.2). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
 new types, operations, terminators, and error kinds are additive. MSRV is 1.85.

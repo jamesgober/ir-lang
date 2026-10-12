@@ -416,11 +416,10 @@ fn bin(op: Arith, p: Policy, a: i64, b: i64) -> Result<i64, Exit> {
         Arith::Min => a.min(b),
         Arith::Max => a.max(b),
         Arith::Pow => {
+            // OPS §6: a negative exponent is `NegativeExponent` under every
+            // `overflow` policy (`trap` covers only an unrepresentable power).
             if b < 0 {
-                return Err(match p.overflow {
-                    Some(Overflow::Trap) => Exit::Trap(6),
-                    _ => Exit::Error(6),
-                });
+                return Err(Exit::Error(6));
             }
             match pow_exact(a, b as u64) {
                 Some(v) => v,

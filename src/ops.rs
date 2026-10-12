@@ -95,8 +95,9 @@ pub enum BinaryOp {
     TotalCmp,
     /// Power (OPS v2). Integer: the exact power by repeated squaring, `0 ** 0 = 1`,
     /// an unrepresentable result per `overflow`; a negative exponent (signed types
-    /// only) raises `NegativeExponent` (E0006), or traps with that code under
-    /// `overflow = trap`. Float: the family's shared `ls_pow` routine
+    /// only) raises `NegativeExponent` (E0006) under every `overflow` policy,
+    /// `trap` included, so signed integer `pow` is always the operation of a
+    /// `check` terminator. Float: the family's shared `ls_pow` routine
     /// ([`ls_pow`](crate::ls_pow)), bit-identical on every tier.
     Pow,
 }
@@ -302,7 +303,9 @@ pub enum Overflow {
     Error,
     /// Two's-complement wrap-around; never fails.
     Wrap,
-    /// Abort the program deterministically with the `ArithOverflow` code.
+    /// Abort the program deterministically with the `ArithOverflow` code. Only an
+    /// unrepresentable result traps: a negative `pow` exponent is still the
+    /// `NegativeExponent` error (OPS §6), never a trap.
     Trap,
 }
 
@@ -741,11 +744,13 @@ impl BinaryOp {
     /// terminator (and a `check` of it is valid).
     ///
     /// Besides any `error` field, two OPS v2 rules raise errors on signed types:
-    /// integer `pow` with a negative exponent raises `NegativeExponent` under
-    /// every `overflow` policy except `trap` (which traps with that code), and
+    /// integer `pow` with a negative exponent raises `NegativeExponent` (E0006)
+    /// under **every** `overflow` policy, `trap` included (OPS §3 `pow`, §6: only
+    /// `promote`, which the IR cannot represent, gives a value instead), and
     /// `shl`/`shr` under `shift = saturate` raise `ShiftOutOfRange` for a negative
     /// amount. Unsigned operands cannot be negative, so neither rule applies to
-    /// them.
+    /// them. `overflow = trap` still traps on an unrepresentable power; it does
+    /// not turn the negative-exponent error into a trap.
     ///
     /// # Examples
     ///
@@ -753,9 +758,11 @@ impl BinaryOp {
     /// use ir_lang::{BinaryOp, Overflow, Policy, Shift, Type};
     ///
     /// let wrap = Policy::overflow(Overflow::Wrap);
+    /// let trap = Policy::overflow(Overflow::Trap);
     /// assert!(BinaryOp::Pow.can_error(wrap, Type::I32)); // a negative exponent
+    /// assert!(BinaryOp::Pow.can_error(trap, Type::I32)); // ... under `trap` too
     /// assert!(!BinaryOp::Pow.can_error(wrap, Type::U32));
-    /// assert!(!BinaryOp::Pow.can_error(Policy::overflow(Overflow::Trap), Type::I32));
+    /// assert!(!BinaryOp::Pow.can_error(trap, Type::U32)); // traps on overflow only
     /// let sat = Policy::shift(Shift::Saturate);
     /// assert!(BinaryOp::Shl.can_error(sat, Type::I8)); // a negative amount
     /// assert!(!BinaryOp::Shl.can_error(sat, Type::U8));
@@ -769,7 +776,7 @@ impl BinaryOp {
             return false;
         }
         match self {
-            BinaryOp::Pow => !matches!(policy.overflow, Some(Overflow::Trap)),
+            BinaryOp::Pow => true,
             BinaryOp::Shl | BinaryOp::Shr => matches!(policy.shift, Some(Shift::Saturate)),
             _ => false,
         }
@@ -849,7 +856,9 @@ pub enum OpError {
     InvalidConversion,
     /// `E0005`: `char_from_u32` of a value that is not a Unicode scalar value.
     InvalidChar,
-    /// `E0006` (OPS v2): integer `pow` with a negative exponent.
+    /// `E0006` (OPS v2): integer `pow` with a negative exponent. Always an error
+    /// through a `check` edge, whatever the `overflow` policy; no instruction
+    /// traps with this code (a `trap 6` terminator written by a front end can).
     NegativeExponent,
 }
 

@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>no_std</code>-compatible (needs only <code>alloc</code>; the interpreter needs <code>std</code>), <code>#![forbid(unsafe_code)]</code>, no dependencies.
     </p>
     <blockquote>
-        <strong>2.0.0-alpha.2 is a pre-release</strong> of the 2.0 redesign. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is <code>_lexersketch/specs/IR.md</code>; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
+        <strong>2.0.0-alpha.3 is a pre-release</strong> of the 2.0 redesign. alpha.3 is a conformance fix: integer <code>pow</code> with a negative exponent is now the <code>NegativeExponent</code> error under every overflow policy, <code>trap</code> included, as OPS requires (alpha.2 trapped), so a signed <code>pow</code> is always a <code>check</code>. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is <code>_lexersketch/specs/IR.md</code>; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
     </blockquote>
 </div>
 
@@ -53,7 +53,7 @@ What it guarantees, and how each guarantee is checked:
 | A well-typed program built with the builder validates. | Property tests lower thousands of random programs (loops, calls, invokes, tail calls, memory, globals, checked arithmetic, exceptions) and validate each. |
 | Dominance and the safepoint rule are decided exactly. | Property tests compare the validator with brute-force references on random control-flow graphs (loops, unreachable blocks, block parameters): dominance by path removal, reference liveness by path search. |
 | Validation is total: it accepts or reports, never panics. | A sweep corrupts internal state thousands of times; property tests validate mutated text and the results of hostile rewrites. |
-| Operations follow `specs/OPS.md` (v2) exactly, on every type and policy. | The interpreter is compared against independent reference arithmetic on the OPS edge values of every integer type and policy (integer `pow` and `shift = saturate` included), IEEE special cases, and exact rational checks of `ieee_rem`; float `pow` (`ls_pow`) matches all 122 vectors of `specs/ops-vectors/pow.md` bit for bit. |
+| Operations follow `specs/OPS.md` (v2) exactly, on every type and policy. | The interpreter is compared against independent reference arithmetic on the OPS edge values of every integer type and policy (integer `pow` and `shift = saturate` included; a negative `pow` exponent is pinned as the E0006 error under every policy and signedness, in the interpreter and in the validator's `check` placement), IEEE special cases, and exact rational checks of `ieee_rem`; float `pow` (`ls_pow`) matches all 122 vectors of `specs/ops-vectors/pow.md` bit for bit. |
 | SSA construction from mutable variables preserves meaning and leaves no trivial block parameter. | Random programs with mutable variables, loops, invokes, and checked arithmetic are lowered through `def_var`/`use_var`, sealing blocks eagerly and lazily, and run against the independent evaluator; every result is checked for trivial parameters. |
 | Statepoint insertion makes reference-carrying code valid without changing it. | Random programs keep references in variables across allocations, polls, safepoints, and invokes; after insertion they validate (the validator is the oracle), a second insertion changes nothing, and the interpreter's moving-collector simulation computes what an independent evaluator does. |
 | Lowered programs mean what the source means. | Differential tests run each random program in an independent evaluator and, lowered, in the interpreter, before and after a print/parse round trip; results, traps, and exceptions agree exactly. |
@@ -69,21 +69,21 @@ What it guarantees, and how each guarantee is checked:
 
 ```toml
 [dependencies]
-ir-lang = "2.0.0-alpha.2"
+ir-lang = "2.0.0-alpha.3"
 ```
 
 With the reference interpreter:
 
 ```toml
 [dependencies]
-ir-lang = { version = "2.0.0-alpha.2", features = ["interp"] }
+ir-lang = { version = "2.0.0-alpha.3", features = ["interp"] }
 ```
 
 Without the standard library:
 
 ```toml
 [dependencies]
-ir-lang = { version = "2.0.0-alpha.2", default-features = false }
+ir-lang = { version = "2.0.0-alpha.3", default-features = false }
 ```
 
 <hr>

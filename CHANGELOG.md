@@ -21,6 +21,84 @@
 
 ---
 
+## [2.0.0-alpha.3] - 2026-10-12
+
+A conformance fix (ISSUES P36). OPS v2 (`specs/OPS.md`, normative: the `pow` row
+of §3 and E0006 in §6) makes integer `pow` with a negative exponent the
+`NegativeExponent` error under **every** `overflow` policy except `promote`.
+alpha.2, and IR.md v2 §4/§5, made it a trap with code 6 under `overflow = trap`.
+bvm-lang raises the error, so irgen-lang 0.2's bytecode differential disagreed
+with the IR tier and had to test the exponent itself. alpha.3 follows OPS;
+IR.md is corrected to v2.1 to match.
+
+### Breaking (vs 2.0.0-alpha.2)
+
+- **A signed integer `pow` is now always fallible, so it must be the operation
+  of a `check` terminator under every `overflow` policy, `trap` included.**
+  `BinaryOp::Pow.can_error(Policy::overflow(Overflow::Trap), ty)` is now `true`
+  for `i8`..`i64` (was `false`). A plain `pow<overflow=trap>` on a signed type is
+  refused by the builder and the validator with `ErrorOutsideCheck { op: "pow" }`
+  (it was accepted), and a `check pow<overflow=trap>` on a signed type is now
+  accepted (it was refused with `NotFallible`). Unsigned `pow<overflow=trap>` is
+  unchanged: a plain instruction that traps on overflow.
+- **The interpreter and `eval_binary` give `OpFault::Error(NegativeExponent)`
+  for a negative exponent under `overflow = trap`** (was
+  `OpFault::Trap(NegativeExponent)`). A run that hit it used to end in
+  `Outcome::Trap(6)`; the same program, rewritten with a `check` as it must now
+  be, takes the error edge with `err = 6`. `overflow = trap` still traps with
+  code 1 when the power is not representable.
+- No trapping instruction produces code 6 any more. `trap 6` written as a
+  terminator (an error block aborting with the OPS code) is unchanged.
+
+### Fixed
+
+- Integer `pow` with a negative exponent under `overflow = trap` is the
+  `NegativeExponent` error, as OPS §3/§6 require (ISSUES P36). Fixed in the
+  validator's placement rule (`BinaryOp::can_error`), the interpreter
+  (`eval_binary`, `interp::run`), and the differential tests' independent
+  evaluator. The printer and parser read and write policies as syntax and
+  needed no change: the text `pow<overflow=trap>` still parses and prints, and
+  `Module::validate` decides whether it is valid for its operand type.
+- `_lexersketch/specs/IR.md` corrected to v2.1: §4 (placement rule), §5 (`pow`),
+  §7 (`trap code` row: no instruction traps with 6), §8.1, §16.
+- Documentation that described the old rule or was out of date:
+  `ValidationErrorKind::ErrorOutsideCheck` listed only `error` fields and
+  `char_from_u32` as fallible (stale since alpha.2: it now names the
+  type-dependent `pow` and `saturate` rules); `OpFault::Error` said "the policy
+  is `error`" (it is also `char_from_u32`, a negative `pow` exponent, and a
+  negative saturating shift amount); `Overflow::Trap`, `BinaryOp::Pow`,
+  `OpError::NegativeExponent`, and `eval_binary` now state the rule; the
+  installation snippet in `docs/API.md` still named 2.0.0-alpha.1.
+- The rest of OPS v2 was re-checked against the interpreter and IR.md for the
+  same kind of drift (`shift = saturate` with a negative or too-large amount,
+  `shift = mask` with a negative amount, `div_zero`, signed `MIN / -1` and
+  `MIN rem -1`, `float_to_int` under `error` and `saturate`, `int_cast`,
+  `neg`/`abs` of `MIN`, `char_from_u32`): no other divergence. The only
+  operations that trap are now `overflow = trap` (code 1) and `div_zero = trap`
+  (code 2), which is what OPS defines.
+
+### Added
+
+- `tests/ops_v2.rs`: `test_pow_negative_exponent_rule_for_every_policy_and_signedness`
+  pins the rule over every `overflow` policy × every integer type: `can_error`,
+  the builder's plain/`check` placement both ways, and the interpreter's result
+  for an all-ones exponent (the E0006 error on signed types; on unsigned types
+  the largest exponent, which overflows per the policy). The end-to-end test
+  now runs a signed `check pow<overflow=trap>` (error edge with 6 for a negative
+  exponent, trap 1 on overflow) and a plain unsigned `pow<overflow=trap>`.
+
+### Migrating from 2.0.0-alpha.2
+
+| alpha.2 | alpha.3 |
+|---|---|
+| `v2: i32 = pow<overflow=trap> v0, v1` as a plain instruction on a signed type | `check pow<overflow=trap> v0, v1 to bOk(res0) error bErr(err)`; in the builder, `b.check(InstData::Binary { op: BinaryOp::Pow, policy, args }, ok, err)` |
+| Choosing plain vs `check` by hand for signed `pow` (`overflow != trap` → `check`) | `op.can_error(policy, ty)`, which now says `true` for every signed `pow` |
+| A front end relying on `Outcome::Trap(6)` / an abort with code 6 from a negative exponent under `trap` | Route the `check`'s error edge to `trap 6` if the language wants an abort; it receives `err = 6` |
+| A constant folder mapping `OpFault::Trap(NegativeExponent)` to "keep the trap" | It is `OpFault::Error(NegativeExponent)`: fold the `check` to a `jump` to its error block passing the constant `6` as `u32` (or leave it) |
+| Unsigned `pow<overflow=trap>` | Unchanged |
+
+---
+
 ## [2.0.0-alpha.2] - 2026-10-11
 
 OPS v2 in the IR, SSA construction for mutable locals, and automatic statepoint
@@ -307,7 +385,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.2...HEAD
+[Unreleased]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.3...HEAD
+[2.0.0-alpha.3]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.2...v2.0.0-alpha.3
 [2.0.0-alpha.2]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.1...v2.0.0-alpha.2
 [2.0.0-alpha.1]: https://github.com/jamesgober/ir-lang/compare/v1.0.0...v2.0.0-alpha.1
 [1.0.0]: https://github.com/jamesgober/ir-lang/compare/v0.2.0...v1.0.0

@@ -116,7 +116,8 @@ opt-lang 0.2.0's workarounds for the missing instruction move and the per-parame
 
 Delivered:
 - OPS v2: `BinaryOp::Pow` (integer: exact power, overflow per policy, negative exponent →
-  `NegativeExponent` E0006 / trap 6; float: `ls_pow`), `Shift::Saturate`,
+  `NegativeExponent` E0006 / trap 6 under `trap` (wrong; corrected in alpha.3, P36); float:
+  `ls_pow`), `Shift::Saturate`,
   `OpError::NegativeExponent`; interpreter, validator, printer, parser. `promote` stays
   unrepresentable.
 - `ls_pow` in `core`, bit for bit `specs/ops-vectors/pow.md` (all 122 vectors in
@@ -164,6 +165,40 @@ Known limits, recorded:
   refused alongside `split_block` while blocks are unsealed. It has no separate budget: it
   creates at most one parameter per (variable, block) pair a read reaches, which is the size of
   the pruned SSA form the front end asked for; table growth is bounded by `MAX_ENTITIES`.
+
+## v2.0.0-alpha.3 - negative `pow` exponents follow OPS (DONE, 2026-10-12)
+A conformance fix found by a consumer: irgen-lang 0.2's bytecode differential (ISSUES P36).
+OPS v2 (normative: §3 `pow`, §6 E0006) makes a negative integer `pow` exponent the
+`NegativeExponent` error under every `overflow` policy but `promote`; alpha.2 and IR.md v2 made
+it a trap with code 6 under `trap`, while bvm-lang raises the error.
+
+Delivered:
+- `BinaryOp::can_error(policy, ty)`: every signed integer `pow` is fallible (`trap` included), so
+  the validator and the builder refuse a plain signed `pow<overflow=trap>` (`ErrorOutsideCheck`)
+  and accept it in a `check` (was `NotFallible`). Unsigned unchanged.
+- Interpreter / `eval_binary`: a negative exponent is `OpFault::Error(NegativeExponent)` under
+  every policy; `overflow = trap` traps (code 1) only on an unrepresentable power.
+- Printer and parser: no change needed (policies are syntax; validity is decided by
+  `Module::validate`), confirmed by a parse/print/validate test of both signednesses.
+- `_lexersketch/specs/IR.md` → v2.1: §4, §5, §7 (`trap code` row), §8.1, §16.
+- The rest of OPS v2 re-checked for the same drift (`shift = saturate`/`mask` with negative and
+  too-large amounts, `div_zero`, `MIN / -1`, `MIN rem -1`, `float_to_int`, `int_cast`,
+  `neg`/`abs` of `MIN`, `char_from_u32`): no other code or IR.md divergence. Stale docs fixed
+  (`ErrorOutsideCheck`, `OpFault::Error`, the API.md install snippet).
+- Proof: `tests/ops_v2.rs` pins the rule over every `overflow` policy × every integer type
+  (`can_error`, placement both ways, interpreter result); the reference comparison over all OPS
+  edge values and the end-to-end run updated; the differential evaluator follows the rule.
+
+Dependency wiring (recorded per the anti-deferral rule):
+- **Unchanged: no dependency.** The fix is local to the placement rule and the interpreter.
+
+Known limits, recorded:
+- As in alpha.2, fallibility is by type: a signed `check pow<overflow=trap>` whose exponent is a
+  known non-negative constant stays a `check` (its error edge is then dead); an optimizer
+  strength-reduces or keeps it.
+- OPS §6 itself is incomplete in two rows (reported to the coordinator, not edited here: OPS is
+  outside this crate): E0003 lists only `shift = error`, though §3 makes a negative
+  `shift = saturate` amount E0003 too; E0001 omits `pow` and `floor_div`. ir-lang follows §3.
 
 ## v2.0.0-beta.1 - consumer-driven fixes
 Exit criteria:

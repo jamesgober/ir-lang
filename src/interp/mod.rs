@@ -418,9 +418,12 @@ fn wrap(ty: Type, v: i128) -> u64 {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
 pub enum OpFault {
-    /// The policy is `error`.
+    /// The OPS error is raised: the policy is `error`, or the failure is one no
+    /// policy turns into a trap (`char_from_u32` of a non-scalar, a negative
+    /// `pow` exponent, a negative `shift = saturate` amount). Control leaves
+    /// through the `check` terminator's error edge.
     Error(OpError),
-    /// The policy is `trap`.
+    /// The policy is `trap`: the program aborts with the kind's code.
     Trap(OpError),
 }
 
@@ -653,14 +656,13 @@ fn int_binary(op: BinaryOp, policy: Policy, ty: Type, a: u64, b: u64) -> Result<
 }
 
 /// OPS v2 integer `pow`: the exact power of `x` (bits `a`) to `e >= 0`, or the
-/// `overflow` policy applied to the wrapped power; a negative exponent is
-/// `NegativeExponent`, a trap under `overflow = trap` and an error otherwise.
+/// `overflow` policy applied to the wrapped power; a negative exponent is the
+/// `NegativeExponent` error under every policy (OPS §3, §6: only `promote`,
+/// which the IR cannot represent, would give a value). `overflow = trap` covers
+/// an unrepresentable power, not a negative exponent.
 fn int_pow(ty: Type, policy: Policy, x: i128, e: i128, a: u64) -> Result<u64, OpFault> {
     if e < 0 {
-        return Err(match policy.overflow {
-            Some(Overflow::Trap) => OpFault::Trap(OpError::NegativeExponent),
-            _ => OpFault::Error(OpError::NegativeExponent),
-        });
+        return Err(OpFault::Error(OpError::NegativeExponent));
     }
     let m = mask_for(ty, PointerWidth::P64);
     // Repeated squaring, twice over: wrapping in u64 gives the low bits of the
@@ -694,20 +696,26 @@ fn int_pow(ty: Type, policy: Policy, x: i128, e: i128, a: u64) -> Result<u64, Op
 ///
 /// # Errors
 ///
-/// [`OpFault`] for integer overflow, division by zero, an out-of-range shift, or
-/// a negative `pow` exponent, under `error` or `trap` (OPS §3, §6).
+/// [`OpFault`] for integer overflow, division by zero, or an out-of-range shift,
+/// under `error` or `trap`; and [`OpFault::Error`] for a negative `pow` exponent
+/// under every `overflow` policy, `trap` included (OPS §3, §6).
 ///
 /// # Examples
 ///
 /// ```
-/// use ir_lang::interp::eval_binary;
-/// use ir_lang::{BinaryOp, DivZero, Policy, Type};
+/// use ir_lang::interp::{eval_binary, OpFault};
+/// use ir_lang::{BinaryOp, DivZero, OpError, Overflow, Policy, Type};
 ///
 /// // floor_mod: the sign follows the divisor.
 /// let p = Policy::div_zero(DivZero::Error);
 /// assert_eq!(eval_binary(BinaryOp::FloorMod, p, Type::I32, (-7i32) as u32 as u64, 3), Ok(2));
 /// // rem: the sign follows the dividend.
 /// assert_eq!(eval_binary(BinaryOp::Rem, p, Type::I32, (-7i32) as u32 as u64, 3), Ok((-1i32) as u32 as u64));
+/// // A negative exponent is an error even under `trap`; overflow traps.
+/// let trap = Policy::overflow(Overflow::Trap);
+/// let minus_one = (-1i32) as u32 as u64;
+/// assert_eq!(eval_binary(BinaryOp::Pow, trap, Type::I32, 2, minus_one), Err(OpFault::Error(OpError::NegativeExponent)));
+/// assert_eq!(eval_binary(BinaryOp::Pow, trap, Type::I32, 2, 31), Err(OpFault::Trap(OpError::ArithOverflow)));
 /// ```
 pub fn eval_binary(op: BinaryOp, policy: Policy, ty: Type, a: u64, b: u64) -> Result<u64, OpFault> {
     if ty.is_int() {

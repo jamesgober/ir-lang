@@ -279,9 +279,16 @@ pub enum ValidationErrorKind {
         /// The fields it must carry.
         required: PolicyFields,
     },
-    /// An operation that can raise an error (a policy field is `error`, or
-    /// `char_from_u32`) appears as a plain instruction; it must be the operation of
-    /// a `check` terminator.
+    /// An operation that can raise an error appears as a plain instruction; it
+    /// must be the operation of a `check` terminator. Fallible means: a policy
+    /// field is `error`; `char_from_u32`; or, on a signed integer type, `pow`
+    /// under any `overflow` policy (a negative exponent) or `shl`/`shr` under
+    /// `shift = saturate` (a negative amount). [`BinaryOp::can_error`],
+    /// [`UnaryOp::can_error`], and [`ConvOp::can_error`] are the rule.
+    ///
+    /// [`BinaryOp::can_error`]: crate::BinaryOp::can_error
+    /// [`UnaryOp::can_error`]: crate::UnaryOp::can_error
+    /// [`ConvOp::can_error`]: crate::ConvOp::can_error
     ErrorOutsideCheck {
         /// The opcode.
         op: &'static str,

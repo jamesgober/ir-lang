@@ -140,11 +140,10 @@ mod semantics {
                 for a in edges(ty) {
                     for e in edges(ty) {
                         let got = eval_binary(BinaryOp::Pow, p, ty, to_bits(ty, a), to_bits(ty, e));
+                        // OPS §3 `pow`, §6 E0006: a negative exponent is the
+                        // error under every policy, `trap` included.
                         let want = if e < 0 {
-                            Err(match ov {
-                                Overflow::Trap => OpFault::Trap(OpError::NegativeExponent),
-                                _ => OpFault::Error(OpError::NegativeExponent),
-                            })
+                            Err(OpFault::Error(OpError::NegativeExponent))
                         } else {
                             match exact_pow(a, e, hi.max(-lo)) {
                                 Some(v) if v >= lo && v <= hi => Ok(to_bits(ty, v)),
@@ -290,13 +289,16 @@ mod semantics {
         assert_eq!(g(f32::MAX, 2.0), f32::INFINITY);
     }
 
-    /// `check pow` routes E0006 to the error edge; `pow<overflow=trap>` traps
-    /// with code 6; a saturating signed shift by a negative amount errors with 3.
+    /// `check pow` routes E0006 to the error edge under `wrap` and under `trap`
+    /// (where only an overflow traps, with code 1); a plain unsigned
+    /// `pow<overflow=trap>` traps on overflow; a saturating signed shift by a
+    /// negative amount errors with 3.
     #[test]
     fn test_interpreter_runs_v2_ops_end_to_end() {
         use ir_lang::interp::{self, Outcome, Val};
         let text = r#"module "v2" ptr64
 sig s0 = (i32, i32) -> (i32, u32) fast
+sig s1 = (u32, u32) -> (u32) fast
 
 func @pow_check s0 export {
 b0(v0: i32, v1: i32):
@@ -311,9 +313,13 @@ b2(v4: u32):
 
 func @pow_trap s0 export {
 b0(v0: i32, v1: i32):
-    v2: i32 = pow<overflow=trap> v0, v1
+    check pow<overflow=trap> v0, v1 to b1(res0) error b2(err)
+b1(v2: i32):
     v3: u32 = const 0
     ret v2, v3
+b2(v4: u32):
+    v5: i32 = const 0
+    ret v5, v4
 }
 
 func @shift s0 export {
@@ -326,11 +332,17 @@ b2(v4: u32):
     v5: i32 = const 0
     ret v5, v4
 }
+
+func @upow s1 export {
+b0(v0: u32, v1: u32):
+    v2: u32 = pow<overflow=trap> v0, v1
+    ret v2
+}
 "#;
         let m = ir_lang::parse(text).unwrap();
         m.validate().unwrap();
         assert_eq!(m.to_string(), text);
-        let [pc, pt, sh] = [0, 1, 2].map(ir_lang::FuncId::from_u32);
+        let [pc, pt, sh, up] = [0, 1, 2, 3].map(ir_lang::FuncId::from_u32);
         let run = |f, a: i32, b: i32| interp::run(&m, f, &[Val::i32(a), Val::i32(b)]).unwrap();
         assert_eq!(
             run(pc, 3, 4),
@@ -344,8 +356,22 @@ b2(v4: u32):
             run(pc, 2, 40),
             Outcome::Return(vec![Val::i32(0), Val::u32(0)]) // wraps to 0
         );
-        assert_eq!(run(pt, 2, -1), Outcome::Trap(6));
+        // Under `trap` a negative exponent still takes the error edge (code 6);
+        // only an unrepresentable power traps (code 1).
+        assert_eq!(
+            run(pt, 2, -1),
+            Outcome::Return(vec![Val::i32(0), Val::u32(6)])
+        );
+        assert_eq!(
+            run(pt, 2, 30),
+            Outcome::Return(vec![Val::i32(1 << 30), Val::u32(0)])
+        );
         assert_eq!(run(pt, 2, 31), Outcome::Trap(1));
+        let urun = |a: u32, b: u32| interp::run(&m, up, &[Val::u32(a), Val::u32(b)]).unwrap();
+        assert_eq!(urun(3, 4), Outcome::Return(vec![Val::u32(81)]));
+        // An exponent with the top bit set is large, not negative.
+        assert_eq!(urun(1, u32::MAX), Outcome::Return(vec![Val::u32(1)]));
+        assert_eq!(urun(2, u32::MAX), Outcome::Trap(1));
         assert_eq!(
             run(sh, -7, 99),
             Outcome::Return(vec![Val::i32(-1), Val::u32(0)])
@@ -384,6 +410,12 @@ fn test_v2_placement_rules() {
         ),
         (
             Type::I32,
+            Policy::overflow(Overflow::Trap),
+            BinaryOp::Pow,
+            true,
+        ),
+        (
+            Type::U32,
             Policy::overflow(Overflow::Trap),
             BinaryOp::Pow,
             false,
@@ -501,8 +533,82 @@ fn test_v2_names_codes_and_text() {
     // `promote` is still not representable.
     let text = "module \"m\" ptr64\nsig s0 = (i64) -> (i64) fast\n\nfunc @f s0 export {\nb0(v0: i64):\n    v1: i64 = pow<overflow=promote> v0, v0\n    ret v1\n}\n";
     assert!(ir_lang::parse(text).is_err());
-    let ok = text.replace("promote", "trap");
-    let m = ir_lang::parse(&ok).unwrap();
+    // A plain signed `pow<overflow=trap>` parses (the parser reads syntax) and
+    // round-trips, but does not validate: a negative exponent is an error, not
+    // a trap, so the operation belongs in a `check`.
+    let signed = text.replace("promote", "trap");
+    let m = ir_lang::parse(&signed).unwrap();
+    assert_eq!(m.to_string(), signed);
+    assert_eq!(
+        m.validate().map_err(|e| e.kind().clone()),
+        Err(ValidationErrorKind::ErrorOutsideCheck { op: "pow" })
+    );
+    // On an unsigned type it is a plain instruction.
+    let unsigned = signed.replace("i64", "u64");
+    let m = ir_lang::parse(&unsigned).unwrap();
     m.validate().unwrap();
-    assert_eq!(m.to_string(), ok);
+    assert_eq!(m.to_string(), unsigned);
+}
+
+/// ISSUES P36, pinned for every `overflow` policy × signedness × width: integer
+/// `pow` with a negative exponent is `NegativeExponent` (E0006), never a trap
+/// (OPS §3 `pow`, §6), so on a signed type every policy needs a `check`; on an
+/// unsigned type no exponent is negative, so only `overflow = error` does.
+#[test]
+fn test_pow_negative_exponent_rule_for_every_policy_and_signedness() {
+    let mut pinned = 0;
+    for ty in INT_TYPES {
+        for ov in [Overflow::Error, Overflow::Wrap, Overflow::Trap] {
+            let p = Policy::overflow(ov);
+            let fallible = ty.is_signed_int() || ov == Overflow::Error;
+            assert_eq!(BinaryOp::Pow.can_error(p, ty), fallible, "{ty} {p}");
+            // The validator applies the same rule, both ways round.
+            let (mut m, f) = single(&[ty, ty]);
+            let mut b = m.build(f).unwrap();
+            let (x, y) = (b.param(0).unwrap(), b.param(1).unwrap());
+            let plain = b.binary(BinaryOp::Pow, p, x, y);
+            assert_eq!(plain.is_ok(), !fallible, "{ty} {p}: {plain:?}");
+            let ok = b.create_block(&[ty]).unwrap();
+            let err = b.create_block(&[Type::U32]).unwrap();
+            let checked = b.check(
+                InstData::Binary {
+                    op: BinaryOp::Pow,
+                    policy: p,
+                    args: [x, y],
+                },
+                BlockCall::with_args(ok, &[BlockArg::Result(0)]),
+                BlockCall::with_args(err, &[BlockArg::ErrorCode]),
+            );
+            assert_eq!(checked.is_ok(), fallible, "{ty} {p}: {checked:?}");
+            #[cfg(feature = "interp")]
+            {
+                use ir_lang::interp::{OpFault, eval_binary};
+                // -1 as an exponent: an error on signed types under every
+                // policy; on unsigned types the same bits are the largest
+                // exponent, so 2 ** MAX overflows per the policy.
+                let all_ones = to_bits(ty, -1);
+                let got = eval_binary(BinaryOp::Pow, p, ty, 2, all_ones);
+                let want = if ty.is_signed_int() {
+                    Err(OpFault::Error(OpError::NegativeExponent))
+                } else {
+                    match ov {
+                        Overflow::Wrap => Ok(0),
+                        Overflow::Trap => Err(OpFault::Trap(OpError::ArithOverflow)),
+                        _ => Err(OpFault::Error(OpError::ArithOverflow)),
+                    }
+                };
+                assert_eq!(got, want, "{ty} 2 ** {all_ones:#x} {p}");
+                // A negative base with a non-negative exponent is never E0006.
+                if ty.is_signed_int() {
+                    assert_eq!(
+                        eval_binary(BinaryOp::Pow, p, ty, to_bits(ty, -2), 3),
+                        Ok(to_bits(ty, -8)),
+                        "{ty} {p}"
+                    );
+                }
+            }
+            pinned += 1;
+        }
+    }
+    assert_eq!(pinned, 24);
 }
