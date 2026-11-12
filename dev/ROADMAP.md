@@ -2,7 +2,6 @@
 
 > Path from scaffold to a stable 1.0, then the 2.0 redesign for LexerSketch's native path
 > (`_lexersketch/specs/IR.md`). Hard parts are front-loaded; each phase has hard exit criteria.
-> Master plan: ../../_strategy/LANG_COLLECTION.md
 >
 > **Anti-deferral rule:** no listed hard task moves to a later phase unless this file records the move and the reason.
 
@@ -196,7 +195,7 @@ Known limits, recorded:
 - As in alpha.2, fallibility is by type: a signed `check pow<overflow=trap>` whose exponent is a
   known non-negative constant stays a `check` (its error edge is then dead); an optimizer
   strength-reduces or keeps it.
-- OPS §6 itself is incomplete in two rows (reported to the coordinator, not edited here: OPS is
+- OPS §6 itself is incomplete in two rows (reported, not edited here: OPS is
   outside this crate): E0003 lists only `shift = error`, though §3 makes a negative
   `shift = saturate` amount E0003 too; E0001 omits `pow` and `floor_div`. ir-lang follows §3.
 
