@@ -1061,6 +1061,10 @@ pub struct Limits {
     /// Bytes of address space (default 4 MiB; capped at 4 GiB, 3.5 GiB for 32-bit
     /// modules). Backing storage grows on demand; growth the system refuses is
     /// [`InterpError::OutOfMemory`].
+    ///
+    /// The register files of live frames (8 bytes per value of each function on
+    /// the call stack) are held to the same number of bytes, separately: a call
+    /// that would take them past it is [`InterpError::OutOfMemory`].
     pub memory: u64,
 }
 

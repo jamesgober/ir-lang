@@ -596,3 +596,33 @@ fn test_builder_and_validator_agree_on_a_wrong_edge() {
     b.ret(&[]).unwrap();
     m.validate().unwrap();
 }
+
+#[test]
+fn test_dominators_stay_fast_on_a_long_chain_with_a_join() {
+    // A chain of blocks where every block also branches to one join block gives the
+    // join a predecessor at every depth. The iterative dominator algorithm climbed
+    // the chain once per predecessor (quadratic); this must stay near linear.
+    let n = 100_000;
+    let mut m = Module::new("m");
+    let sig = Signature::new(&[Type::Bool], &[]);
+    let f = m.declare_function("f", &sig, Linkage::Export).unwrap();
+    {
+        let mut b = m.build(f).unwrap();
+        let c = b.param(0).unwrap();
+        let join = b.create_block(&[]).unwrap();
+        let blocks: Vec<_> = (0..n).map(|_| b.create_block(&[]).unwrap()).collect();
+        b.jump(blocks[0], &[]).unwrap();
+        for i in 0..n {
+            b.switch_to(blocks[i]).unwrap();
+            let next = if i + 1 < n { blocks[i + 1] } else { join };
+            b.branch(c, join, &[], next, &[]).unwrap();
+        }
+        b.switch_to(join).unwrap();
+        b.ret(&[]).unwrap();
+    }
+    let t = std::time::Instant::now();
+    m.validate().unwrap();
+    // Seconds before the change even in release builds; well under one after it,
+    // in debug builds on a slow runner.
+    assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+}

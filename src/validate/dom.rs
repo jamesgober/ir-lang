@@ -1,4 +1,4 @@
-//! Dominators (Cooper–Harvey–Kennedy) and the linear SSA dominance check.
+//! Dominators (Lengauer–Tarjan) and the linear SSA dominance check.
 
 use alloc::vec::Vec;
 
@@ -21,16 +21,28 @@ impl Idom {
     }
 }
 
-/// Postorder of the blocks reachable from `entry`, with an explicit stack.
-fn postorder(entry: usize, cfg: &Cfg) -> Vec<u32> {
+/// A depth-first walk from `entry` with an explicit stack: the reachable blocks in
+/// preorder and in postorder, and each block's depth-first tree parent.
+struct Dfs {
+    pre: Vec<u32>,
+    post: Vec<u32>,
+    parent: Vec<u32>,
+}
+
+fn dfs(entry: usize, cfg: &Cfg) -> Dfs {
     let n = cfg.start.len().saturating_sub(1);
-    let mut order = Vec::new();
+    let mut out = Dfs {
+        pre: Vec::new(),
+        post: Vec::new(),
+        parent: alloc::vec![u32::MAX; n],
+    };
     if entry >= n {
-        return order;
+        return out;
     }
     let mut visited = alloc::vec![false; n];
     let mut stack: Vec<(u32, u32)> = Vec::new();
     visited[entry] = true;
+    out.pre.push(entry as u32);
     stack.push((entry as u32, 0));
     while let Some(top) = stack.last_mut() {
         let (b, i) = *top;
@@ -40,77 +52,119 @@ fn postorder(entry: usize, cfg: &Cfg) -> Vec<u32> {
             if let Some(v) = visited.get_mut(s as usize) {
                 if !*v {
                     *v = true;
+                    out.pre.push(s);
+                    out.parent[s as usize] = b;
                     stack.push((s, 0));
                 }
             }
         } else {
-            order.push(b);
+            out.post.push(b);
             let _ = stack.pop();
         }
     }
-    order
+    out
 }
 
-/// Cooper, Harvey, and Kennedy, "A Simple, Fast Dominance Algorithm" (2001).
+/// Immediate dominators by Lengauer and Tarjan, "A Fast Algorithm for Finding
+/// Dominators in a Flowgraph" (1979), simple version: path compression without
+/// balanced linking, `O(e log n)` for `e` edges and `n` blocks. Everything runs in
+/// preorder numbers, and compression uses an explicit stack, so no shape of graph
+/// recurses or goes quadratic.
 pub(crate) fn compute_idoms(entry: usize, cfg: &Cfg) -> Idom {
+    const NO: u32 = u32::MAX;
     let n = cfg.start.len().saturating_sub(1);
-    let po = postorder(entry, cfg);
-    let mut po_num = alloc::vec![u32::MAX; n];
-    for (i, &b) in po.iter().enumerate() {
-        po_num[b as usize] = i as u32;
+    let walk = dfs(entry, cfg);
+    let rpo: Vec<u32> = walk.post.iter().rev().copied().collect();
+    let mut idom = alloc::vec![NO; n];
+    let count = walk.pre.len();
+    if count == 0 {
+        return Idom { idom, rpo };
     }
+    // Preorder number of each block (NO when unreachable).
+    let mut num = alloc::vec![NO; n];
+    for (i, &b) in walk.pre.iter().enumerate() {
+        num[b as usize] = i as u32;
+    }
+    // From here on every array is indexed by preorder number.
+    let parent: Vec<u32> = walk
+        .pre
+        .iter()
+        .map(|&b| {
+            let p = walk.parent[b as usize];
+            if p == NO { 0 } else { num[p as usize] }
+        })
+        .collect();
+    let mut semi: Vec<u32> = (0..count as u32).collect();
+    let mut label: Vec<u32> = (0..count as u32).collect();
+    let mut ancestor = alloc::vec![NO; count];
+    let mut dom = alloc::vec![NO; count];
+    // Buckets as intrusive lists: `head[v]` is the first vertex whose
+    // semidominator is `v`, `next[w]` the one after `w`.
+    let mut head = alloc::vec![NO; count];
+    let mut next = alloc::vec![NO; count];
+    let mut path: Vec<u32> = Vec::new();
     let preds = cfg.reversed();
-    let mut idom = alloc::vec![u32::MAX; n];
-    if entry < n {
-        idom[entry] = entry as u32;
-    }
-    let rpo: Vec<u32> = po.iter().rev().copied().collect();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in &rpo {
-            if b as usize == entry {
+
+    // The vertex with the least semidominator on the forest path from `v` up to
+    // (not including) its root, compressing the path on the way.
+    let mut eval = |v: u32, ancestor: &mut [u32], label: &mut [u32], semi: &[u32]| -> u32 {
+        if ancestor[v as usize] == NO {
+            return v;
+        }
+        path.clear();
+        let mut x = v;
+        while ancestor[ancestor[x as usize] as usize] != NO {
+            path.push(x);
+            x = ancestor[x as usize];
+        }
+        while let Some(x) = path.pop() {
+            let a = ancestor[x as usize] as usize;
+            if semi[label[a] as usize] < semi[label[x as usize] as usize] {
+                label[x as usize] = label[a];
+            }
+            ancestor[x as usize] = ancestor[a];
+        }
+        label[v as usize]
+    };
+
+    for w in (1..count).rev() {
+        let block = walk.pre[w] as usize;
+        for &p in preds.succs(block) {
+            let v = num.get(p as usize).copied().unwrap_or(NO);
+            if v == NO {
                 continue;
             }
-            let mut new = u32::MAX;
-            for &p in preds.succs(b as usize) {
-                if idom.get(p as usize).copied().unwrap_or(u32::MAX) == u32::MAX {
-                    continue;
-                }
-                new = if new == u32::MAX {
-                    p
-                } else {
-                    intersect(p, new, &idom, &po_num)
-                };
-            }
-            if idom[b as usize] != new {
-                idom[b as usize] = new;
-                changed = true;
+            let u = eval(v, &mut ancestor, &mut label, &semi);
+            if semi[u as usize] < semi[w] {
+                semi[w] = semi[u as usize];
             }
         }
+        let s = semi[w] as usize;
+        next[w] = head[s];
+        head[s] = w as u32;
+        let p = parent[w];
+        ancestor[w] = p;
+        let mut v = core::mem::replace(&mut head[p as usize], NO);
+        while v != NO {
+            let u = eval(v, &mut ancestor, &mut label, &semi);
+            dom[v as usize] = if semi[u as usize] < semi[v as usize] {
+                u
+            } else {
+                p
+            };
+            v = next[v as usize];
+        }
+    }
+    for w in 1..count {
+        if dom[w] != semi[w] {
+            dom[w] = dom[dom[w] as usize];
+        }
+    }
+    dom[0] = 0;
+    for (i, &b) in walk.pre.iter().enumerate() {
+        idom[b as usize] = walk.pre[dom[i] as usize];
     }
     Idom { idom, rpo }
-}
-
-fn intersect(mut a: u32, mut b: u32, idom: &[u32], po_num: &[u32]) -> u32 {
-    // Both fingers only ever climb toward the entry (whose postorder number is the
-    // largest), so the loop ends; the step bound and checked reads keep it total
-    // regardless.
-    let num = |x: u32| po_num.get(x as usize).copied().unwrap_or(u32::MAX);
-    let up = |x: u32| idom.get(x as usize).copied().unwrap_or(x);
-    let mut budget = 2 * idom.len() + 2;
-    while a != b && budget > 0 {
-        budget -= 1;
-        while num(a) < num(b) && budget > 0 {
-            budget -= 1;
-            a = up(a);
-        }
-        while num(b) < num(a) && budget > 0 {
-            budget -= 1;
-            b = up(b);
-        }
-    }
-    a
 }
 
 enum Visit {
@@ -229,4 +283,111 @@ pub(crate) fn check_dominance(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The previous algorithm (Cooper, Harvey, and Kennedy, iterative), kept as the
+    /// oracle: simple enough to trust, quadratic on some graphs.
+    fn reference(entry: usize, cfg: &Cfg) -> Vec<u32> {
+        let n = cfg.start.len().saturating_sub(1);
+        let po = dfs(entry, cfg).post;
+        let mut po_num = alloc::vec![u32::MAX; n];
+        for (i, &b) in po.iter().enumerate() {
+            po_num[b as usize] = i as u32;
+        }
+        let preds = cfg.reversed();
+        let mut idom = alloc::vec![u32::MAX; n];
+        if entry < n {
+            idom[entry] = entry as u32;
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &b in po.iter().rev() {
+                if b as usize == entry {
+                    continue;
+                }
+                let mut new = u32::MAX;
+                for &p in preds.succs(b as usize) {
+                    if idom[p as usize] == u32::MAX {
+                        continue;
+                    }
+                    new = if new == u32::MAX {
+                        p
+                    } else {
+                        let (mut a, mut c) = (p, new);
+                        while a != c {
+                            while po_num[a as usize] < po_num[c as usize] {
+                                a = idom[a as usize];
+                            }
+                            while po_num[c as usize] < po_num[a as usize] {
+                                c = idom[c as usize];
+                            }
+                        }
+                        a
+                    };
+                }
+                if idom[b as usize] != new {
+                    idom[b as usize] = new;
+                    changed = true;
+                }
+            }
+        }
+        idom
+    }
+
+    fn cfg_of(n: usize, edges: &[(u32, u32)]) -> Cfg {
+        let mut start = Vec::with_capacity(n + 1);
+        let mut succ = Vec::new();
+        for b in 0..n as u32 {
+            start.push(succ.len() as u32);
+            succ.extend(edges.iter().filter(|e| e.0 == b).map(|e| e.1));
+        }
+        start.push(succ.len() as u32);
+        Cfg { start, succ }
+    }
+
+    #[test]
+    fn test_matches_the_iterative_algorithm_on_random_graphs() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rand = |m: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        for round in 0..3000 {
+            let n = 1 + rand(40) as usize;
+            let density = 1 + rand(4);
+            let mut edges = Vec::new();
+            for b in 0..n as u64 {
+                for _ in 0..rand(density + 1) {
+                    edges.push((b as u32, rand(n as u64) as u32));
+                }
+                // Mostly forward chains, so most blocks are reachable.
+                if b + 1 < n as u64 && rand(3) != 0 {
+                    edges.push((b as u32, b as u32 + 1));
+                }
+            }
+            let entry = rand(n as u64) as usize;
+            let cfg = cfg_of(n, &edges);
+            let fast = compute_idoms(entry, &cfg);
+            assert_eq!(fast.idom, reference(entry, &cfg), "round {round}");
+            let rpo: Vec<u32> = dfs(entry, &cfg).post.into_iter().rev().collect();
+            assert_eq!(fast.rpo, rpo);
+        }
+    }
+
+    #[test]
+    fn test_empty_and_out_of_range_entry() {
+        let cfg = cfg_of(0, &[]);
+        assert!(compute_idoms(0, &cfg).idom.is_empty());
+        let cfg = cfg_of(3, &[(0, 1)]);
+        let d = compute_idoms(5, &cfg);
+        assert_eq!(d.idom, alloc::vec![u32::MAX; 3]);
+        assert!(d.rpo.is_empty());
+    }
 }

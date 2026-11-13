@@ -50,7 +50,7 @@
 //!
 //! [`Module::validate`] is total (it accepts or reports, never panics) and checks:
 //! entry parameters against the signature, single definition, dominance (the
-//! Cooper–Harvey–Kennedy dominator tree and one linear walk), types and exact
+//! Lengauer–Tarjan dominator tree and one linear walk), types and exact
 //! policies of every instruction, exception-edge rules (landing pads, `nounwind`,
 //! `noreturn`, `nogc`), and the safepoint rules (no GC reference or pointer derived
 //! from one is live across a safepoint). The [`Builder`] runs the same

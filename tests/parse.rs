@@ -331,3 +331,35 @@ fn test_symbol_quoting_round_trips() {
     );
     assert_eq!(m.to_string(), text);
 }
+
+#[test]
+fn test_table_budget_is_shared_by_all_bodies() {
+    // Every body stores its values densely by id. One value at a high id in each of
+    // many functions must not add up to a table per function: the budget of
+    // `64 * input length + 4096` entries is for the whole module.
+    let module = |k: usize, id: u64| {
+        let mut s = String::from("module \"m\" ptr64\nsig s0 = (i64) -> (i64) fast\n");
+        for i in 0..k {
+            s.push_str(&format!(
+                "\nfunc @f{i} s0 export {{\nb0(v{id}: i64):\n    ret v{id}\n}}\n"
+            ));
+        }
+        s
+    };
+    let k = 25;
+    let len = module(k, 999_999).len() as u64;
+    let text = module(k, len * 64);
+    let err = parse(&text).unwrap_err();
+    assert!(
+        matches!(err.kind(), ParseErrorKind::TooManyEntities { .. }),
+        "{err}"
+    );
+    // The second function is the one that runs out.
+    assert_eq!(err.line(), 10);
+
+    // Ids well inside the budget still parse, sparse or not.
+    let text = module(k, 2_000);
+    let m = parse(&text).unwrap();
+    m.validate().unwrap();
+    assert_eq!(m.to_string(), text);
+}
