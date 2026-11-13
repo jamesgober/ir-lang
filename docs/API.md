@@ -1,6 +1,6 @@
 # ir-lang &mdash; API Reference
 
-> Complete reference for every public item in `ir-lang` 2.0.0-alpha.3, with examples.
+> Complete reference for every public item in `ir-lang` 2.0.0-alpha.4, with examples.
 > **Status: pre-release.** The surface may change before `2.0.0`; see
 > [`../dev/ROADMAP.md`](../dev/ROADMAP.md). The normative semantics are
 > `_lexersketch/specs/IR.md` (the IR) and `_lexersketch/specs/OPS.md` (operations).
@@ -65,9 +65,9 @@
 
 ```toml
 [dependencies]
-ir-lang = "2.0.0-alpha.3"                                              # the IR
-ir-lang = { version = "2.0.0-alpha.3", features = ["interp"] }         # plus the interpreter
-ir-lang = { version = "2.0.0-alpha.3", default-features = false }      # no_std + alloc
+ir-lang = "2.0.0-alpha.4"                                              # the IR
+ir-lang = { version = "2.0.0-alpha.4", features = ["interp"] }         # plus the interpreter
+ir-lang = { version = "2.0.0-alpha.4", default-features = false }      # no_std + alloc
 ```
 
 ## Quick start
@@ -902,7 +902,8 @@ assert_eq!(m.to_string(), text);
 ### `ParseLimits`
 
 `{ max_bytes (default 256 MiB), max_id (default 2^26) }`. Entity ids are also capped at
-`64 × input length + 4096`.
+`64 × input length + 4096`, and so is the total length of the value and block tables of all
+function bodies together (`TooManyEntities` past it).
 
 ### `ParseError`
 
@@ -911,7 +912,7 @@ assert_eq!(m.to_string(), text);
 ### `ParseErrorKind`
 
 `InputTooLarge`, `UnexpectedChar`, `UnterminatedString`, `BadEscape`, `Expected`,
-`UnknownOpcode`, `UnknownType`, `UnknownSymbol`, `BadNumber`, `IdTooLarge`, `OutOfOrder`,
+`UnknownOpcode`, `UnknownType`, `UnknownSymbol`, `BadNumber`, `IdTooLarge`, `TooManyEntities`, `OutOfOrder`,
 `Duplicate`, `Undefined`, `NonConsecutiveResults`, `MissingResult`, `Module(ModuleError)`
 (`#[non_exhaustive]`).
 
@@ -943,7 +944,7 @@ assert_eq!(interp::run(&m, f, &[Val::u8(200)])?, Outcome::Trap(1));
 | `Interpreter::new(&Module, H)`, `with_limits(…, Limits)` | Validates the module and lays out globals (relocations applied). Errors: `Invalid`, `OutOfMemory`. |
 | `Interpreter::call(FuncId, &[Val])` | Runs a function to completion; memory persists across calls. |
 | `memory()`, `memory_mut()`, `global_address(GlobalId)`, `fuel_used()`, `host_mut()` | Inspection. |
-| `Limits { fuel, max_depth, memory }` | Defaults 10M, 1000, 4 MiB (memory capped at 4 GiB). |
+| `Limits { fuel, max_depth, memory }` | Defaults 10M, 1000, 4 MiB (memory capped at 4 GiB). The register files of live frames, 8 bytes per value, are held to `memory` bytes too. |
 | `Outcome` | `Return(Vec<Val>)`, `Unwind(Val)`, `Trap(u32)`. |
 | `InterpError` | `Invalid`, `UnresolvedImport`, `BadArguments`, `FuelExhausted`, `StackOverflow`, `OutOfMemory`, `MemoryFault`, `Misaligned`, `Overlap`, `InvalidBool`, `UnreachableReached`, `StaleRef`, `BadFunctionPointer`, `UncheckedError`, `Host`. |
 | `Val` | A typed bit pattern: `new`, `i8`…`u64`, `f32`, `f64`, `bool`, `ptr`; `ty`, `bits`, `as_i128`, `as_f64`, `as_bool`, `same_as` (NaN-equivalent). |
@@ -974,7 +975,6 @@ a missing relocation is caught at run time.
 
 ## Stability
 
-`2.0.0-alpha.3` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
-[`CHANGELOG.md`](../CHANGELOG.md) (2.0.0-alpha.2 lists those since alpha.1, 2.0.0-alpha.3 those
-since alpha.2). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
+`2.0.0-alpha.4` is a pre-release. Breaking changes may land before `2.0.0`; each is recorded in
+[`CHANGELOG.md`](../CHANGELOG.md) (each alpha lists those since the one before). Every public enum is `#[non_exhaustive]`, so from `2.0.0` on
 new types, operations, terminators, and error kinds are additive. MSRV is 1.85.

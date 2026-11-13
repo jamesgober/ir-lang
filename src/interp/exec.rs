@@ -44,6 +44,11 @@ struct Frame {
     pending: Pending,
 }
 
+/// The size in bytes of `n` register words.
+fn words(n: usize) -> u64 {
+    (n as u64).saturating_mul(8)
+}
+
 /// A finished callee: its return bits, or an exception payload.
 type CallResult = Result<Vec<u64>, u64>;
 
@@ -76,7 +81,12 @@ pub struct Interpreter<'m, H: Host> {
     globals: Vec<u64>,
     fuel: u64,
     frames: Vec<Frame>,
+    /// Bytes of register file held by live frames, held within the memory
+    /// budget.
+    regs_bytes: u64,
     spare: Vec<Vec<u64>>,
+    /// Bytes of capacity held in `spare`, also kept within the memory budget.
+    spare_bytes: u64,
     root_returns: Vec<Type>,
 }
 
@@ -177,7 +187,9 @@ impl<'m, H: Host> Interpreter<'m, H> {
             globals,
             fuel: 0,
             frames: Vec::new(),
+            regs_bytes: 0,
             spare: Vec::new(),
+            spare_bytes: 0,
             root_returns: Vec::new(),
         };
         interp.init_globals()?;
@@ -396,8 +408,33 @@ impl<'m, H: Host> Interpreter<'m, H> {
     fn pop_frame(&mut self) {
         if let Some(f) = self.frames.pop() {
             self.mem.sp = f.sp_mark;
-            self.spare.push(f.regs);
+            self.regs_bytes = self.regs_bytes.saturating_sub(words(f.regs.len()));
+            self.keep_spare(f.regs);
         }
+    }
+
+    /// Keeps a register file for reuse while the pool stays within the memory
+    /// budget; drops it otherwise.
+    fn keep_spare(&mut self, regs: Vec<u64>) {
+        let held = words(regs.capacity());
+        if self.spare_bytes.saturating_add(held) <= self.mem.size() {
+            self.spare_bytes += held;
+            self.spare.push(regs);
+        }
+    }
+
+    /// A register file of `len` zeroed words, from the pool when it has one.
+    fn take_regs(&mut self, len: usize) -> Vec<u64> {
+        let mut regs = match self.spare.pop() {
+            Some(r) => {
+                self.spare_bytes = self.spare_bytes.saturating_sub(words(r.capacity()));
+                r
+            }
+            None => Vec::new(),
+        };
+        regs.clear();
+        regs.resize(len, 0);
+        regs
     }
 
     fn push_frame(&mut self, func: FuncId, args: &[u64]) -> Result<(), InterpError> {
@@ -405,9 +442,15 @@ impl<'m, H: Host> Interpreter<'m, H> {
             return Err(InterpError::StackOverflow);
         }
         let body = self.body_of(func)?;
-        let mut regs = self.spare.pop().unwrap_or_default();
-        regs.clear();
-        regs.resize(body.value_count(), 0);
+        // The register file is host memory the program controls (one word per
+        // value of the callee, at every depth), so it counts against the budget.
+        let cost = words(body.value_count());
+        let charged = self
+            .regs_bytes
+            .checked_add(cost)
+            .filter(|&c| c <= self.mem.size())
+            .ok_or(InterpError::OutOfMemory)?;
+        let mut regs = self.take_regs(body.value_count());
         let entry = body.entry();
         for (&p, &a) in body.block_params(entry).iter().zip(args) {
             if let Some(r) = regs.get_mut(p.index()) {
@@ -432,15 +475,18 @@ impl<'m, H: Host> Interpreter<'m, H> {
                 .ok_or(InterpError::OutOfMemory)?;
             if end > self.mem.heap_floor {
                 self.mem.sp = sp_mark;
+                self.keep_spare(regs);
                 return Err(InterpError::OutOfMemory);
             }
             if let Err(e) = self.mem.claim_stack(addr, end) {
                 self.mem.sp = sp_mark;
+                self.keep_spare(regs);
                 return Err(e);
             }
             self.mem.sp = end;
             slots.push(addr);
         }
+        self.regs_bytes = charged;
         self.frames.push(Frame {
             func,
             block: entry,

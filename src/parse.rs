@@ -1,9 +1,9 @@
 //! The parser for the textual form printed by `Module`'s `Display`.
 //!
 //! The parser is iterative (the grammar has no nesting beyond one level of braces),
-//! linear in the input, and bounded: the input size is capped, and entity ids are
-//! capped relative to the input size, so a short input cannot make it allocate a
-//! huge table. It reads syntax only; [`Module::validate`](crate::Module::validate)
+//! linear in the input, and bounded: the input size is capped, and entity ids, and
+//! the value and block tables of all function bodies together, are capped relative
+//! to the input size, so a short input cannot make it allocate a huge table. It reads syntax only; [`Module::validate`](crate::Module::validate)
 //! checks meaning. Ids in the text are kept exactly, so a printed module parses
 //! back to the same handles.
 
@@ -42,8 +42,9 @@ pub struct ParseLimits {
     /// The largest input accepted, in bytes (default 256 MiB; at most `u32::MAX`).
     pub max_bytes: usize,
     /// The largest entity id (value, block, ...) accepted (default 2^26). Ids are
-    /// also capped at `64 * input length + 4096`, so a short input cannot make the
-    /// parser allocate a large table.
+    /// also capped at `64 * input length + 4096`, and so is the total length of the
+    /// value and block tables of all function bodies together, so a short input
+    /// cannot make the parser allocate a large table.
     pub max_id: u32,
 }
 
@@ -106,6 +107,13 @@ pub enum ParseErrorKind {
         /// The id.
         id: u64,
     },
+    /// The value and block tables of all function bodies together would exceed
+    /// `64 * input length + 4096` entries. Bodies are stored densely by id, so
+    /// sparse ids in many functions add up.
+    TooManyEntities {
+        /// The limit, in table entries.
+        limit: u64,
+    },
     /// Aggregates, signatures, or stack slots must be numbered 0, 1, 2, ... in order.
     OutOfOrder {
         /// What is out of order.
@@ -143,6 +151,9 @@ impl fmt::Display for ParseErrorKind {
             K::UnknownSymbol { name } => write!(f, "undeclared symbol `@{name}`"),
             K::BadNumber { text } => write!(f, "invalid number `{text}`"),
             K::IdTooLarge { id } => write!(f, "id {id} exceeds the parser's limits"),
+            K::TooManyEntities { limit } => {
+                write!(f, "bodies need more than {limit} table entries")
+            }
             K::OutOfOrder { what } => write!(f, "{what} must be numbered in order from 0"),
             K::Duplicate { what } => write!(f, "{what} is defined twice"),
             K::Undefined { what } => write!(f, "{what} is used but never defined"),
@@ -277,6 +288,8 @@ pub fn parse_with(text: &str, limits: &ParseLimits) -> Result<Module, ParseError
         toks,
         pos: 0,
         id_cap,
+        entries_limit: relative,
+        entries_left: relative,
         funcs: BTreeMap::new(),
         globals: BTreeMap::new(),
         results: Vec::new(),
@@ -497,6 +510,9 @@ struct Parser<'a> {
     toks: Vec<Token<'a>>,
     pos: usize,
     id_cap: u32,
+    /// The module-wide budget of value and block table entries, and what is left.
+    entries_limit: u64,
+    entries_left: u64,
     funcs: BTreeMap<String, FuncId>,
     globals: BTreeMap<String, GlobalId>,
     /// Reused per instruction: (value id, type, offset) of each result.
@@ -1138,6 +1154,21 @@ impl<'a> Parser<'a> {
         Ok(body.func)
     }
 
+    /// Charges `n` new table entries against the module-wide budget.
+    fn charge_entries(&mut self, n: usize, at: u32) -> PResult<()> {
+        let n = n as u64;
+        if n > self.entries_left {
+            return Err(self.err_at(
+                at,
+                ParseErrorKind::TooManyEntities {
+                    limit: self.entries_limit,
+                },
+            ));
+        }
+        self.entries_left -= n;
+        Ok(())
+    }
+
     fn define_value(
         &mut self,
         body: &mut Body,
@@ -1148,6 +1179,7 @@ impl<'a> Parser<'a> {
     ) -> PResult<Value> {
         let index = id as usize;
         if body.func.values.len() <= index {
+            self.charge_entries(index + 1 - body.func.values.len(), at)?;
             body.func.values.resize(
                 index + 1,
                 ValueNode {
@@ -1179,6 +1211,7 @@ impl<'a> Parser<'a> {
         let id = self.entity("b", "a block")?;
         let index = id as usize;
         if body.func.blocks.len() <= index {
+            self.charge_entries(index + 1 - body.func.blocks.len(), at)?;
             while body.func.blocks.len() <= index {
                 let mut dead = BlockNode::new(Vec::new());
                 dead.live = false;

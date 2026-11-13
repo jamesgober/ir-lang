@@ -1137,3 +1137,53 @@ fn test_large_memory_limits_cost_only_what_is_touched() {
         assert_eq!(vm.memory().read(a + (1 << 20) - 1, 1).unwrap(), &[0]);
     }
 }
+
+#[test]
+fn test_register_files_count_against_the_memory_budget() {
+    // Each frame holds one register per value of its function, reachable or not.
+    // Deep recursion through a function with many values must hit the memory budget
+    // instead of quietly allocating depth * values * 8 bytes of host memory.
+    let pad = 20_000;
+    let mut m = Module::new("m");
+    let sig = Signature::new(&[Type::I64], &[Type::I64]);
+    let f = m.declare_function("f", &sig, Linkage::Export).unwrap();
+    {
+        let mut b = m.build(f).unwrap();
+        let n = b.param(0).unwrap();
+        let rec = b.create_block(&[]).unwrap();
+        let done = b.create_block(&[]).unwrap();
+        let dead = b.create_block(&[]).unwrap();
+        let zero = b.iconst(Type::I64, 0).unwrap();
+        let more = b.compare(CmpOp::Gt, n, zero).unwrap();
+        b.branch(more, rec, &[], done, &[]).unwrap();
+        b.switch_to(rec).unwrap();
+        let one = b.iconst(Type::I64, 1).unwrap();
+        let n1 = b.sub(n, one, Overflow::Wrap).unwrap();
+        let call = b.call(Call::direct(f, &[n1])).unwrap();
+        let r = b.results(call).first().unwrap();
+        b.ret(&[r]).unwrap();
+        b.switch_to(done).unwrap();
+        b.ret(&[n]).unwrap();
+        b.switch_to(dead).unwrap();
+        let mut last = zero;
+        for i in 0..pad {
+            last = b.iconst(Type::I64, i as i128).unwrap();
+        }
+        b.ret(&[last]).unwrap();
+    }
+    let limits = Limits::default();
+    let per_frame = 8 * (pad as u64 + 8);
+    let fits = limits.memory / per_frame;
+    let mut vm = Interpreter::with_limits(&m, NoHost, limits).unwrap();
+    // Far below max_depth, far above what the budget holds.
+    assert_eq!(
+        vm.call(f, &[Val::i64(5_000)]),
+        Err(InterpError::OutOfMemory)
+    );
+    // The charge is released with the frames: a call that fits still runs.
+    let depth = (fits as i64 - 2).max(0);
+    assert_eq!(
+        vm.call(f, &[Val::i64(depth)]),
+        Ok(Outcome::Return(vec![Val::i64(0)]))
+    );
+}

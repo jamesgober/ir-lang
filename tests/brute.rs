@@ -2,6 +2,10 @@
 //! references on random control-flow graphs (written in the textual form, so any
 //! shape is reachable, including unreachable blocks, loops, and self-loops).
 
+// Block numbers drive these loops: they index several parallel tables and name
+// blocks in the generated text.
+#![allow(clippy::needless_range_loop)]
+
 mod common;
 
 use common::Rng;

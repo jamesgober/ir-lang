@@ -760,8 +760,7 @@ impl Repair {
         for &bb in rpo {
             let block = Block::from_u32(bb);
             let nparams = self.orig_params.get(bb as usize).copied().unwrap_or(0) as usize;
-            for k in 0..nparams {
-                let p = func.blocks[bb as usize].params[k];
+            for &p in func.blocks[bb as usize].params.iter().take(nparams) {
                 if let Some(var) = self.var(p) {
                     self.set_cur(var, bb, p);
                 }

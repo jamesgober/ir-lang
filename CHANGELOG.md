@@ -21,6 +21,41 @@
 
 ---
 
+## [2.0.0-alpha.4] - 2026-11-12
+
+Three resource bounds that did not hold on hostile input. No other behaviour changes.
+
+### Added
+
+- `ParseErrorKind::TooManyEntities { limit }`: the value and block tables of all
+  function bodies together would pass `64 * input length + 4096` entries.
+
+### Changed
+
+- **The interpreter counts register files against `Limits::memory`.** Each live
+  frame holds 8 bytes per value of its function, and the total for all live
+  frames may not pass the memory limit. A call that would pass it is
+  `InterpError::OutOfMemory`. Deep recursion through a function with many values
+  used to run until `max_depth` while allocating that memory outside the limit.
+  The pool of reused register files is kept within the same bound.
+- Dominators are now computed with the Lengauer-Tarjan algorithm (path
+  compression, `O(e log n)`). The results are the same.
+
+### Fixed
+
+- The parser no longer grows memory with the square of its input. Ids were capped
+  per input, but every function body allocates a dense table up to its largest
+  id, so many short functions that each named one high id added up: 11.7 KB of
+  text could allocate about 2.8 GB. The id cap now also applies to the value and
+  block tables of all bodies together, so the parser's tables stay linear in the
+  input.
+- `Module::validate` took time quadratic in the number of blocks on some graphs,
+  for example a long chain of blocks that all branch to one join block: 40,000
+  such blocks took about two seconds, and the time grew fourfold each time the
+  chain doubled. The dominator computation is now near linear.
+
+---
+
 ## [2.0.0-alpha.3] - 2026-10-12
 
 A conformance fix (ISSUES P36). OPS v2 (`specs/OPS.md`, normative: the `pow` row
@@ -385,7 +420,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.3...HEAD
+[Unreleased]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.4...HEAD
+[2.0.0-alpha.4]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.3...v2.0.0-alpha.4
 [2.0.0-alpha.3]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.2...v2.0.0-alpha.3
 [2.0.0-alpha.2]: https://github.com/jamesgober/ir-lang/compare/v2.0.0-alpha.1...v2.0.0-alpha.2
 [2.0.0-alpha.1]: https://github.com/jamesgober/ir-lang/compare/v1.0.0...v2.0.0-alpha.1
