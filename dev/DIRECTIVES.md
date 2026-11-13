@@ -13,7 +13,7 @@ This library is built and maintained to a production standard and treated as a f
 ## 1. What this is
 
 ir-lang is the SSA intermediate representation of the family's native compiler path (2.0;
-normative spec: `_lexersketch/specs/IR.md`). A front end lowers into it after
+normative spec: the IR specification). A front end lowers into it after
 monomorphization, closure conversion, pattern compilation, and effect lowering; opt-lang
 rewrites it; instruction selection reads it into backend-lang MIR. A `Module` holds functions
 (signatures with calling-convention tags, linkage, attributes), globals with relocations, and
