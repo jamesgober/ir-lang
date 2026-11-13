@@ -1,6 +1,6 @@
 //! `ls_pow`: the family's shared float power routine (OPS v2 §4).
 //!
-//! Specified operation by operation in `_lexersketch/specs/ops-vectors/pow.md`,
+//! Specified operation by operation in the `pow` vector table,
 //! so every tier computes the same bits: OPS forbids a platform libm for `pow`,
 //! whose last bit differs between libraries. The routine uses only IEEE 754
 //! binary64 `+ - * /` with round-to-nearest-even, comparisons, and integer
@@ -334,7 +334,7 @@ fn exact_int_pow(x: f64, y: f64) -> Option<f64> {
 /// The special cases of C99 Annex F come first (`pow(x, ±0) = 1` even for a NaN
 /// `x`, `pow(1, y) = 1` even for a NaN `y`, the infinity and signed-zero rules);
 /// every other result is computed by the algorithm of
-/// `_lexersketch/specs/ops-vectors/pow.md` exactly as written. A NaN result is
+/// the `pow` vector table exactly as written. A NaN result is
 /// the canonical quiet NaN `0x7FF8_0000_0000_0000`. The result is the correctly
 /// rounded `x^y` except within about 2^-85 (relative) of a rounding boundary,
 /// where it is still deterministic.

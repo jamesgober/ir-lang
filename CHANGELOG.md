@@ -94,7 +94,7 @@ IR.md is corrected to v2.1 to match.
   evaluator. The printer and parser read and write policies as syntax and
   needed no change: the text `pow<overflow=trap>` still parses and prints, and
   `Module::validate` decides whether it is valid for its operand type.
-- `_lexersketch/specs/IR.md` corrected to v2.1: §4 (placement rule), §5 (`pow`),
+- the IR specification corrected to v2.1: §4 (placement rule), §5 (`pow`),
   §7 (`trap code` row: no instruction traps with 6), §8.1, §16.
 - Documentation that described the old rule or was out of date:
   `ValidationErrorKind::ErrorOutsideCheck` listed only `error` fields and
@@ -139,7 +139,7 @@ IR.md is corrected to v2.1 to match.
 OPS v2 in the IR, SSA construction for mutable locals, and automatic statepoint
 insertion: the gaps the alpha.1 consumers (opt-lang 0.2.0, backend-lang 0.3.0)
 and the HIR lowering (irgen-lang, ISSUES P29) reported. Normative spec:
-`_lexersketch/specs/IR.md` (updated); operation semantics `specs/OPS.md` v2.
+the IR specification (updated); operation semantics `specs/OPS.md` v2.
 
 ### Breaking (vs 2.0.0-alpha.1)
 
@@ -180,7 +180,7 @@ and the HIR lowering (irgen-lang, ISSUES P29) reported. Normative spec:
   validator, printer, and parser support all of it; `promote` stays
   unrepresentable.
 - `ls_pow(x, y)`: the family's shared float `pow`
-  (`_lexersketch/specs/ops-vectors/pow.md`), bit-identical to every other tier,
+  (the `pow` vector table), bit-identical to every other tier,
   in `core` (no `std` needed, so `no_std` optimizers can fold `pow`). The
   interpreter's float `pow` is this routine; `f32` widens, computes, rounds once.
 - `BinaryOp::can_error(Policy, Type)`, `UnaryOp::can_error(Policy)`,
@@ -242,8 +242,8 @@ and the HIR lowering (irgen-lang, ISSUES P29) reported. Normative spec:
 ## [2.0.0-alpha.1] - 2026-10-09
 
 The 2.0 redesign, as a pre-release: the SSA IR of the native compiler path
-(LexerSketch ARCHITECTURE §9), designed once for every later phase. The normative
-specification is `_lexersketch/specs/IR.md`. Consumers (codegen-lang, jit-lang,
+(the toolchain ARCHITECTURE §9), designed once for every later phase. The normative
+specification is the IR specification. Consumers (codegen-lang, jit-lang,
 aot-lang, linker-lang) stay on 1.x until the coordinated Wave M.
 
 ### Breaking

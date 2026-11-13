@@ -19,7 +19,7 @@ readme = "README.md"
 description = "SSA intermediate representation for native compilation: modules, calls, memory, exception edges, safepoints, SSA construction, statepoint insertion, a validator, a rewrite API, and a textual form."
 
 # Keywords (5 max)
-keywords = ["compiler", "ir", "ssa", "codegen", "lexersketch"]
+keywords = ["compiler", "ir", "ssa", "codegen"]
 
 # Categories
 categories = ["development-tools", "compilers"]

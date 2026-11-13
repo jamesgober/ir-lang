@@ -1,5 +1,5 @@
 //! `ls_pow`, the family's shared float power routine (OPS v2 §4), against every
-//! vector of `_lexersketch/specs/ops-vectors/pow.md` §9, bit for bit: directly,
+//! vector of the `pow` vector table §9, bit for bit: directly,
 //! and through the interpreter's `pow` instruction at `f64` and `f32`.
 
 use ir_lang::ls_pow;

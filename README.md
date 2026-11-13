@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>no_std</code>-compatible (needs only <code>alloc</code>; the interpreter needs <code>std</code>), <code>#![forbid(unsafe_code)]</code>, no dependencies.
     </p>
     <blockquote>
-        <strong>2.0.0-alpha.4 is a pre-release</strong> of the 2.0 redesign. alpha.4 fixes three resource bounds: the parser's tables are budgeted across the whole module, validation computes dominators in near-linear time, and the interpreter counts register files against its memory limit. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is <code>_lexersketch/specs/IR.md</code>; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
+        <strong>2.0.0-alpha.4 is a pre-release</strong> of the 2.0 redesign. alpha.4 fixes three resource bounds: the parser's tables are budgeted across the whole module, validation computes dominators in near-linear time, and the interpreter counts register files against its memory limit. The surface may change before <code>2.0.0</code>, which follows once a real consumer (the HIR lowering, opt-lang, and instruction selection) has exercised it. The normative specification is the IR specification; 1.x stays available for current users. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the migration guide and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a> for the path to 2.0.0.
     </blockquote>
 </div>
 

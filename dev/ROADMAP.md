@@ -1,7 +1,7 @@
 ﻿# ir-lang - Roadmap
 
-> Path from scaffold to a stable 1.0, then the 2.0 redesign for LexerSketch's native path
-> (`_lexersketch/specs/IR.md`). Hard parts are front-loaded; each phase has hard exit criteria.
+> Path from scaffold to a stable 1.0, then the 2.0 redesign for the toolchain's native path
+> (the IR specification). Hard parts are front-loaded; each phase has hard exit criteria.
 > Master plan: ../../_strategy/LANG_COLLECTION.md
 >
 > **Anti-deferral rule:** no listed hard task moves to a later phase unless this file records the move and the reason.
@@ -59,9 +59,9 @@ instruction + opaque callee handle) and a multi-function module container.
 ---
 
 ## v2.0.0-alpha.1 - the 2.0 redesign (DONE, 2026-10-08)
-The SSA IR for LexerSketch's native path (ARCHITECTURE §9), designed once for every later
+The SSA IR for the toolchain's native path (ARCHITECTURE §9), designed once for every later
 phase (Phase 4.1; ISSUES H05, M42, M43, M44, M45). Normative spec:
-`_lexersketch/specs/IR.md`. Pre-release: the surface may still change before 2.0.0.
+the IR specification. Pre-release: the surface may still change before 2.0.0.
 
 Delivered:
 - `Module`: functions (interned `Signature`s with `CallConv` tags, `Linkage`, `Attrs`), globals
@@ -180,7 +180,7 @@ Delivered:
   every policy; `overflow = trap` traps (code 1) only on an unrepresentable power.
 - Printer and parser: no change needed (policies are syntax; validity is decided by
   `Module::validate`), confirmed by a parse/print/validate test of both signednesses.
-- `_lexersketch/specs/IR.md` → v2.1: §4, §5, §7 (`trap code` row), §8.1, §16.
+- the IR specification → v2.1: §4, §5, §7 (`trap code` row), §8.1, §16.
 - The rest of OPS v2 re-checked for the same drift (`shift = saturate`/`mask` with negative and
   too-large amounts, `div_zero`, `MIN / -1`, `MIN rem -1`, `float_to_int`, `int_cast`,
   `neg`/`abs` of `MIN`, `char_from_u32`): no other code or IR.md divergence. Stale docs fixed

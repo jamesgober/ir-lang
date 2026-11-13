@@ -3,7 +3,7 @@
 > Complete reference for every public item in `ir-lang` 2.0.0-alpha.4, with examples.
 > **Status: pre-release.** The surface may change before `2.0.0`; see
 > [`../dev/ROADMAP.md`](../dev/ROADMAP.md). The normative semantics are
-> `_lexersketch/specs/IR.md` (the IR) and `_lexersketch/specs/OPS.md` (operations).
+> the IR specification (the IR) and the OPS specification (operations).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -823,7 +823,7 @@ negative amount is still `ShiftOutOfRange`.
 ## `ls_pow`
 
 `ls_pow(x: f64, y: f64) -> f64`: the float `pow` of OPS v2, specified operation by operation in
-`_lexersketch/specs/ops-vectors/pow.md` so every tier produces the same bits (OPS forbids a
+the `pow` vector table so every tier produces the same bits (OPS forbids a
 platform libm). C99 Annex F special cases first; a NaN result is the canonical
 `0x7FF8_0000_0000_0000`; otherwise correctly rounded except within about 2^-85 of a rounding
 boundary, where it is still deterministic. Needs only `core`, so `no_std` optimizers can fold
